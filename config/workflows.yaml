@@ -1,0 +1,25 @@
+# agentic_scripts configuration
+machine:
+  quiet_window:
+    start: "22:00"   # local time, HH:MM; window crosses midnight (start > end)
+    end: "08:00"
+  load_threshold: 2.0          # load1 must be STRICTLY below this
+  poll_interval_minutes: 30    # nominal timer cadence
+  gate_polls_required: 2       # consecutive idle polls needed to open the gate; allowed: 1 or 2
+  gate_poll_tolerance_minutes: 10  # max gap between consecutive idle polls
+agent:
+  binary: opencode
+  model: openaiCompatible/Qwen3.8-27B   # string or null; null = agent's own frontmatter model
+  max_steps: 40            # informational; the live cap is the agent frontmatter `steps`
+  timeout_minutes: 45      # per-workflow hard timeout for the agent run
+  auto_approve: true       # pass --auto to opencode run
+paths:
+  state_dir: state         # relative paths resolve against the project root
+  log_dir: logs
+  sandbox_dir: sandbox
+admin_repo: /workspace/Obsidian/ARP_roadmap   # string or null
+workflows:
+  noop:
+    enabled: true
+    module: agentic_scripts.workflows.noop
+    agent: null            # string or null; set for workflows that spawn an agent
