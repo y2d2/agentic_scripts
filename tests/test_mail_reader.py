@@ -32,10 +32,14 @@ ACCOUNT = "acct"
 M1_ID = "m1@example.com"
 M2_ID = "m2@example.com"
 M3_ID = "m3@example.com"
+M4_ID = "m4@example.com"
 
-# The three fixture messages. m1/m3 are plain text from Alice; m2 is HTML-only from
+# The four fixture messages. m1/m3 are plain text from Alice; m2 is HTML-only from
 # Bob (its body part carries only content-length, so the reader must fall back to the
-# raw maildir file). Dates are in 2026 for the date-prefix test.
+# raw maildir file); m4 is plain text from Carol containing the word "all" (used to
+# prove that notmuch reinterprets ``all:`` as the free-text term "all"). Dates are in
+# 2026 for the date-prefix test. No other fixture message contains the word "all" in
+# any searchable header or body.
 M1 = """From: Alice <alice@example.com>
 To: someone@example.com
 Subject: Hello plain
@@ -71,16 +75,27 @@ Content-Type: text/plain; charset=utf-8
 Second plain body.
 """
 
+M4 = """From: Carol <carol@example.com>
+To: someone@example.com
+Subject: Calling all testers
+Message-Id: <m4@example.com>
+Date: Tue, 20 Oct 2026 13:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+Calling all testers for a quick demo.
+"""
+
 HTML_MARKER = "This is an HTML body marker."
 
 
 def _build_maildir(mail_root: Path) -> None:
-    """Create the three-message maildir under ``mail_root/<ACCOUNT>/cur/``."""
+    """Create the four-message maildir under ``mail_root/<ACCOUNT>/cur/``."""
     cur = mail_root / ACCOUNT / "cur"
     cur.mkdir(parents=True, exist_ok=True)
     (cur / "m1.eml").write_text(M1, encoding="utf-8")
     (cur / "m2.eml").write_text(M2, encoding="utf-8")
     (cur / "m3.eml").write_text(M3, encoding="utf-8")
+    (cur / "m4.eml").write_text(M4, encoding="utf-8")
 
 
 def _build_index(index_path: Path, mail_root: Path, work_dir: Path) -> None:
@@ -130,6 +145,7 @@ def hermetic_mail(tmp_path_factory) -> tuple[NotmuchReader, Path, dict]:
         "m1": M1_ID,
         "m2": M2_ID,
         "m3": M3_ID,
+        "m4": M4_ID,
         "account": ACCOUNT,
         "alice_ids": [M1_ID, M3_ID],
     }
@@ -140,16 +156,16 @@ def hermetic_mail(tmp_path_factory) -> tuple[NotmuchReader, Path, dict]:
 # 1. count() behaviour                                                        #
 # --------------------------------------------------------------------------- #
 def test_count_total_and_filtered(hermetic_mail):
-    """count() == 3 total; from:Alice == 2; folder:cur consistent with its own query."""
+    """count() == 4 total; from:Alice == 2; folder:cur consistent with its own query."""
     reader, _base, meta = hermetic_mail
 
-    assert reader.count() == 3
+    assert reader.count() == 4
     assert reader.count(q_from("Alice")) == 2
 
     # Folder consistency: the account's top-level dir is what notmuch reports as the
     # folder for these messages. Assert against count()'s own value (consistency),
     # not a hardcoded name — but also pin the expected shape (account root).
-    assert reader.count(q_folder(meta["account"], "")) == 3
+    assert reader.count(q_folder(meta["account"], "")) == 4
 
 
 # --------------------------------------------------------------------------- #
@@ -271,22 +287,32 @@ def test_builder_q_and_rejects_broken_prefix():
 
 
 # --------------------------------------------------------------------------- #
-# 9. broken query surfaces                                                    #
+# 9. unsupported forms reinterpreted as free text                              #
 # --------------------------------------------------------------------------- #
-def test_broken_query_surfaces(hermetic_mail):
-    """Document how this build treats the broken ``all:`` form at runtime.
+def test_broken_forms_reinterpreted_as_free_text(hermetic_mail):
+    """Document how notmuch 0.38.3 treats the unsupported query forms at runtime.
 
-    Note (deviation from task spec test #9): in notmuch 0.38.3 as installed here,
-    ``all:`` is a *silent no-op* — ``notmuch count 'all:'`` exits 0 and prints ``0``
-    rather than erroring. The builder's refusal contract (test 8) is what keeps these
-    forms out of real queries; this test records the actual runtime behaviour so the
-    build's quirk is documented by an executable assertion instead of a false
-    expectation of a non-zero exit.
+    Verified 2026-10-20 against the live index (13,111 messages): unknown query
+    properties are NOT rejected by notmuch — they are silently reinterpreted as
+    free-text terms (notmuch's documented fallback), always exiting 0 with no error.
+    ``all:`` returns 5,678 matches, identical to the free-text word ``all``; date-style
+    terms (``after:1990-01-01``, ``before:2100-01-01``, ``last:30d``) match nothing.
+
+    This supersedes the earlier "silent no-op (returns 0)" wording, which was false
+    for ``all:`` — it can silently return a large irrelevant result set. The builder's
+    refusal contract (test 8) is therefore the only safe guard. In this hermetic
+    corpus, m4 is the only message containing the word "all", so both forms must count
+    exactly 1 — proving reinterpretation (a true no-op would yield 0 for ``all:``).
     """
     reader, _base, _meta = hermetic_mail
 
-    # The broken form silently no-ops: it does NOT error and matches nothing.
-    assert reader.count("all:") == 0
+    # Reinterpretation proof: if ``all:`` were a true no-op it would be 0 while
+    # count("all") is 1 (m4's subject/body contain the word "all").
+    assert reader.count("all:") == reader.count("all") == 1
+    # Date-style terms are reinterpreted as free text that matches nothing — and they
+    # do NOT raise NotmuchError (a raised error would fail this test).
+    assert reader.count("after:1990-01-01") == 0
+    assert reader.count("last:30d") == 0
 
 
 # --------------------------------------------------------------------------- #

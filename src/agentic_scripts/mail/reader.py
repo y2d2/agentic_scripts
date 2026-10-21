@@ -16,8 +16,8 @@ Rationale:
     API). A dedicated generated config keeps the reader isolated from any ambient
     ``~/.config/notmuch`` and guarantees ``synchronize_flags=false``. The query
     builders emit only the forms verified to work in this build and deliberately
-    refuse the broken ones (see :data:`SUPPORTED_PREFIXES`), so a caller cannot
-    accidentally construct a query that silently no-ops or errors.
+    refuse the unsupported ones (see :data:`SUPPORTED_PREFIXES`), so a caller cannot
+    accidentally construct a query that notmuch silently reinterprets as free text.
 
 Read-only contract:
     ``NotmuchReader`` opens its index and maildir read-only. It creates only its own
@@ -50,8 +50,16 @@ Verified notmuch 0.38.3 shapes (empirical, read-only probes against the live ind
       parsing.
     - Working query forms: free text, ``from:"..."``, ``folder:"<acct>/<path>"``
       (always double-quoted), ``id:<msgid>``, ``thread:<tid>``, ``date:YYYY*``.
-    - **Broken in this build** (do not use; the builders refuse them): ``all:``,
-      ``field:*`` wildcards, ``after:``, ``before:``, ``last:``.
+    - **Unsupported in this build** (do not use; the builders refuse them): unknown
+      query properties are *not* rejected by notmuch — they are silently reinterpreted
+      as free-text terms (notmuch's documented fallback; verified 2026-10-20 on the
+      live index: ``all:`` returns 5,678 matches, identical to the free-text word
+      ``all``; date-style terms like ``after:1990-01-01``, ``before:2100-01-01``,
+      ``last:30d`` match nothing) — no error, exit 0. The affected forms (``all:``,
+      ``field:*`` wildcards, ``after:``, ``before:``, ``last:``) are forbidden because
+      they can silently return large irrelevant result sets; the builders refuse them
+      (see :data:`SUPPORTED_PREFIXES`); use the verified ``date:YYYY*`` prefix form for
+      date ranges.
 
 Usage:
     >>> from pathlib import Path
@@ -73,13 +81,15 @@ from pathlib import Path
 
 # Query prefixes that are known to work in notmuch 0.38.3. The builder helpers emit
 # only these forms; ``q_and`` rejects any clause whose first token starts with a
-# prefix outside this set (the broken forms: all:, field: wildcards, after:, before:,
-# last:). This constant is the single source of truth for that refusal contract.
+# prefix outside this set (the unsupported forms, which notmuch silently reinterprets
+# as free text: all:, field: wildcards, after:, before:, last:). This constant is the
+# single source of truth for that refusal contract.
 SUPPORTED_PREFIXES = {"from", "folder", "id", "thread", "date"}
 
-# Prefixes explicitly unsupported in this notmuch build. Documented here (and in the
-# module docstring) so the refusal contract is discoverable; ``q_and`` uses it to
-# reject broken clauses with a precise message.
+# Prefixes explicitly unsupported in this notmuch build: notmuch silently reinterprets
+# them as free-text terms (its documented fallback) rather than rejecting them.
+# Documented here (and in the module docstring) so the refusal contract is discoverable;
+# ``q_and`` uses it to reject unsupported clauses with a precise message.
 _UNSUPPORTED_PREFIXES = {"all", "field", "after", "before", "last"}
 
 # The exact reader config body, with two path placeholders. Every generated reader
@@ -224,8 +234,9 @@ def q_date_prefix(year: int) -> str:
 
     Purpose:
         Emit the verified working form for matching messages in a given year using
-        notmuch's date prefix-star (the plain ``after:``/``before:`` forms are broken
-        in this build, so year-prefixing is the supported way to bound by time).
+        notmuch's date prefix-star (the plain ``after:``/``before:`` forms are
+        unsupported — notmuch silently reinterprets them as free text — so
+        year-prefixing is the supported way to bound by time).
 
     Args:
         year: A four-digit calendar year.
@@ -270,10 +281,11 @@ def q_and(*clauses: str) -> str:
         rejected.
 
     Rationale:
-        The broken forms silently no-op in this notmuch build (they return 0 / an
-        empty result rather than erroring), so letting them through would produce
-        wrong results with no signal. Failing loudly at query-construction time is
-        safer than a silent empty answer.
+        The refused forms are NOT rejected by notmuch — they are silently reinterpreted
+        as free-text terms (verified 2026-10-20 on the live index: ``all:`` returns
+        5,678 matches, identical to the free-text word ``all``; date-style terms return
+        0; never an error). A broken form at runtime would silently return a large,
+        irrelevant result set — refusal at build time is the only safe guard.
 
     Args:
         *clauses: One or more clauses, each either the output of one of the ``q_*``
