@@ -94,8 +94,8 @@ class QuietWindow:
             >>> QuietWindow("22:00", "08:00").in_window(time(12, 0))
             False
         """
-        start = _parse_hhmm(self.start)
-        end = _parse_hhmm(self.end)
+        start = _parse_hhmm(self.start, "quiet_window.start")
+        end = _parse_hhmm(self.end, "quiet_window.end")
         if start > end:  # crosses midnight
             return dt >= start or dt < end
         return start <= dt < end
