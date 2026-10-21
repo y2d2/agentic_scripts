@@ -1,0 +1,12 @@
+# Rendered by scripts/setup.sh (substitutes __ROOT__ with the repo root).
+# The container host has no systemd — these units are for real hosts.
+[Unit]
+Description=Run agentic_scripts every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+Unit=agentic-scripts.service
+
+[Install]
+WantedBy=timers.target

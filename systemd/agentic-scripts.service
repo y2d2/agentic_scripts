@@ -1,0 +1,12 @@
+# Rendered by scripts/setup.sh (substitutes __ROOT__ with the repo root).
+# The container host has no systemd — these units are for real hosts.
+[Unit]
+Description=agentic_scripts load-aware workflow run
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/.venv/bin/python -m agentic_scripts run
+StandardOutput=append:__ROOT__/logs/systemd.log
+StandardError=append:__ROOT__/logs/systemd-err.log
