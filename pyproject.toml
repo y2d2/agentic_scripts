@@ -23,6 +23,7 @@ dev = [
 # final — Tasks 2–5 must NOT modify pyproject.toml (parallel-safety).
 [project.scripts]
 agentic-scripts = "agentic_scripts.cli:main"
+mail-search = "agentic_scripts.mail.mail_search:main"
 
 [build-system]
 requires = ["hatchling"]
