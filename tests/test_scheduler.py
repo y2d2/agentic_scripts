@@ -111,8 +111,13 @@ def test_gate_closed_noop(tmp_path: Path) -> None:
     assert not (dirs["state"] / "noop.json").exists()
 
 
-def test_forced_open_run(tmp_path: Path) -> None:
+def test_forced_open_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """2. Forced open run: --force → 0; RUN START force=True, WORKFLOW ok, gate=forced."""
+    # Task 4 follow-up (additive): the shipped config now has mail-keeper enabled, so a
+    # forced run would otherwise start a LIVE BACKFILL (real agent over real history). Point
+    # MAIL_INDEX_DB at a nonexistent tmp path so the workflow lands status=skipped (index
+    # missing) — no canary walk, no agent. Mirrors Task 3b's base-smoke env isolation.
+    monkeypatch.setenv("MAIL_INDEX_DB", str(tmp_path / "no-such-index"))
     dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
     for d in dirs.values():
         d.mkdir(parents=True)
@@ -132,8 +137,13 @@ def test_forced_open_run(tmp_path: Path) -> None:
     assert "trigger: force" in _last_run(dirs["logs"])
 
 
-def test_two_step_gate(tmp_path: Path) -> None:
+def test_two_step_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """3. Two-step gate: poll 1 closed, poll 2 (T+30min) open and runs noop."""
+    # Task 4 follow-up (additive): the shipped config now has mail-keeper enabled, so a
+    # gate-open run would otherwise start a LIVE BACKFILL (real agent over real history).
+    # Point MAIL_INDEX_DB at a nonexistent tmp path so the workflow lands status=skipped
+    # (index missing) — no canary walk, no agent. Mirrors Task 3b's base-smoke env isolation.
+    monkeypatch.setenv("MAIL_INDEX_DB", str(tmp_path / "no-such-index"))
     dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
     for d in dirs.values():
         d.mkdir(parents=True)
