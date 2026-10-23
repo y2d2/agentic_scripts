@@ -131,6 +131,77 @@ injected; no real `opencode`, no real repos, no network.
 uv run pytest tests/smoke/ -v
 ```
 
+## Mail-keeper workflow
+
+The `mail-keeper` workflow triages the local maildir backup into the admin vault on every
+gate-open run: it verifies index freshness (canary), detects new mail since the per-folder
+cursors, invokes the `mail-keeper` agent exactly once with a ≤10-message manifest, and — only
+on an `ok` agent result — records the triage in the processed log, advances the cursors, and
+verifies the mail backup tree is byte-identical before and after. The agent performs the
+provenance-tagged vault fills, local drafts (never sent), and its own `OC:` commit + push to
+the vault's current branch.
+
+On **first runs** the per-folder cursors are epoch 0, so the workflow starts the user-confirmed
+**history backfill**: the whole index is triaged oldest-first in batches of `MAX_BATCH = 10`
+per run until the cursors reach the present (≈1,000 runs expected for the live history). An
+operator can chain `--force` runs to accelerate; per-folder cursors + the processed log make
+each run idempotent, and the agent's dedup rule (grep msg-id before every write) makes
+re-delivery after a failed run safe.
+
+### Environment variables
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `MAIL_INDEX_DB` | `/workspace/docker/mbsync/notmuch` | notmuch index dir (read-only). |
+| `MAIL_MAIL_ROOT` | `/workspace/docker/mbsync/backup` | maildir root (read-only backup). |
+| `MAIL_OWNER_ADDRESS` | `yuri.durodie@vub.be` | Owner address; own-mail is excluded from triage (style sampling only). |
+| `MAIL_PROCESSED_LOG` | `/workspace/Obsidian/config/email-processing-log.jsonl` | Processed-log path (v1 6-field JSONL schema, one record per triaged message). |
+
+Env wins over the defaults; the workflow reads them at run time. The `mail-search` CLI
+(agent-facing) also reads `MAIL_INDEX_DB` from the project `.env`.
+
+### How a run works
+
+1. **Precheck** — `admin_repo` + index must be readable (else `skipped`).
+2. **Canary** — disk-vs-index freshness with a 100-message tolerance; on staleness it
+   *reports and defers* (never loses mail), continuing the run.
+3. **Detection** — per-folder thread search, oldest-first walk, excluding the PII folder,
+   own-mail, and already-processed ids; first runs carry epoch-0 cursors (the backfill).
+4. **Manifest** — ≤10 messages, date-ascending; over-cap entries are deferred (re-injected
+   next run, never starved).
+5. **Agent** — one batched `mail-keeper` invocation with the manifest + skill pointer.
+6. **On `ok`** — triage-class parse, processed-log append, cursor advance, deferred clear,
+   and a before/after backup byte-identity guardrail check.
+
+### Operator commands
+
+```bash
+uv run agentic-scripts run --force --only mail-keeper   # manual run (bypasses the gate)
+uv run agentic-scripts run                              # scheduled run (gate-checked)
+```
+
+Scheduled runs are gated by the quiet window + sustained low load; `--force` bypasses the gate
+for manual/accelerated backfill.
+
+### Where outputs live
+
+- Vault: on its current branch (`feature/test` in the fixture world; the operator's branch
+  in production). `mail/drafts/` is gitignored (local drafts, never sent).
+- Processed log: `MAIL_PROCESSED_LOG` (default `/workspace/Obsidian/config/email-processing-log.jsonl`).
+- State: `state/mail-keeper.json` (`{bootstrapped_at, cursors, deferred}`).
+
+### Guardrails
+
+- **PII folder** (`INBOX/FU-Admin/PhD_applications`) and own-mail are excluded *before* the
+  agent is invoked (defense in depth).
+- **Backup read-only** + a before/after byte-identity check: any mutation of the mail backup
+  tree trips the guardrail and surfaces as an error.
+- **No send tooling**: the workflow never sends mail; drafts are local files only.
+
+The agent/skill lives in the global OpenCode config (`~/.config/opencode/agents/mail-keeper.md`
++ `skills/mail-keeper/SKILL.md`). See the high-level plan at
+`planning/workflows-mail-keeper/work_plan.md`.
+
 ## Extending with a new workflow
 
 1. Add a module under `src/agentic_scripts/workflows/` exposing `create(config) -> Workflow`.
