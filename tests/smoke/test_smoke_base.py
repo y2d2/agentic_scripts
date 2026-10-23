@@ -20,6 +20,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
 import yaml
 
 from agentic_scripts.scheduler import acquire_lock, run
@@ -69,8 +70,27 @@ def _workspace(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
     dirs = {name: tmp_path / name for name in ("state", "logs", "sandbox")}
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
+    # Task 3b (additive): with mail-keeper enabled in the shipped config, a forced run
+    # with fresh state would start a LIVE BACKFILL (real agent over real history). Point
+    # MAIL_INDEX_DB at a nonexistent tmp path so the workflow returns `skipped` (index
+    # missing) — no canary walk, no agent — and MAIL_PROCESSED_LOG at a tmp path so the
+    # production log is never probed. The autouse fixture below restores both after each test.
+    os.environ["MAIL_INDEX_DB"] = str(tmp_path / "no-such-index")
+    os.environ["MAIL_PROCESSED_LOG"] = str(tmp_path / "no-such-log.jsonl")
     cfg = _write_config(tmp_path, dirs["state"], dirs["logs"], dirs["sandbox"])
     return cfg, dirs
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mail_env():
+    """Point MAIL_* env at tmp paths and restore the originals after each test."""
+    saved = {k: os.environ.get(k) for k in ("MAIL_INDEX_DB", "MAIL_PROCESSED_LOG")}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 def test_smoke_gate_closed_noop(tmp_path: Path) -> None:

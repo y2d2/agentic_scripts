@@ -23,3 +23,7 @@ workflows:
     enabled: true
     module: agentic_scripts.workflows.noop
     agent: null            # string or null; set for workflows that spawn an agent
+  mail-keeper:
+    enabled: true
+    module: agentic_scripts.workflows.mail_keeper
+    agent: mail-keeper
