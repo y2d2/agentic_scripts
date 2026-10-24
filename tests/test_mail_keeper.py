@@ -49,6 +49,7 @@ M8_ID = "m8@fixture.test"  # OLD INBOX (Mar 2025) — OUTSIDE the floor, never t
 M4_ID = "m4@fixture.test"  # PII folder — must be excluded
 M5_ID = "m5@fixture.test"  # Sent Items, own mail — must be excluded
 M7_ID = "m7@fixture.test"  # added by the new-mail test (Oct 22)
+B1_ID = "b1@fixture.test"  # cross-folder test: NEW mail in INBOX/ORBIT (Oct 22)
 
 # --- Fixture message bodies -------------------------------------------------- #
 # m3: newest INBOX (Oct 21 11:00), HTML-only.
@@ -479,9 +480,10 @@ def test_run_one_fresh_state_newest_first(hermetic_mail, tmp_path, monkeypatch):
         assert rec["email_file"] in expected_classes
         assert rec["target_section"] == expected_classes[rec["email_file"]]
 
-    # State v2: floor = now−365d (±2 s); new.last_date = ts(m3) (manifest max). The back
-    # frontier is the initial floor — run 1's manifest min (ts(m1)) does not drop it below the
-    # floor, so per the spec's min/max rule it stays at the floor (last_message_id unset).
+    # State v2: floor = now−365d (±2 s); new.last_date = ts(m3) (the batch max). The back
+    # frontier stays at the initial floor after run 1 — every batch member is NEW-kind (ts >
+    # the previous new=0), so there are no history-kind entries to advance it from. It starts
+    # moving only from run 2 onward, when a folder's own history enters the batch.
     state = json.loads((tmp_path / "state" / "mail-keeper.json").read_text(encoding="utf-8"))
     assert "bootstrapped_at" in state
     now = int(time.time())
@@ -695,9 +697,11 @@ A new message that must not be starved by the pending backfill.
     _write_message("INBOX", "n1.eml", n1_body, mail_root)
     _build_index(index_path, mail_root, tmp_path / "reindex")
 
-    # Run 2: manifest [n1, m9, m6, m10] — n1 FIRST even with 3 deferred history messages
-    # waiting (no starvation). The pool is new[n1] + deferred[m9,m6,m10] = 4 entries; the cap
-    # takes the first 3 as the manifest and defers the 4th (m10) again.
+    # Run 2: batch EXACTLY [n1, m9, m6] (3 entries — the cap re-applied). n1 FIRST even with 3
+    # deferred history messages waiting (no starvation): the pool is new[n1] + deferred
+    # [m9,m6,m10] = 4 entries; the ≤ MAX_BATCH=3 cap takes the first 3 as the batch and defers
+    # the 4th (m10) again. (Task 5b: this replaces the old 4-entry assertion that encoded the
+    # batch-cap bug.)
     fake2 = _FakeRunner(
         _ok_result(_triage_table([(N1_ID, "info"), (M9_ID, "noise"), (M6_ID, "noise")]))
     )
@@ -712,14 +716,174 @@ A new message that must not be starved by the pending backfill.
 
     brief2 = fake2.calls[0]["brief"]
     ids2 = _manifest_ids_from_brief(brief2)
-    assert ids2[:1] == [N1_ID], f"n1 must be first (no starvation): {ids2}"
-    assert ids2[:3] == [N1_ID, M9_ID, M6_ID], f"expected [n1,m9,m6] prefix: {ids2}"
+    assert ids2 == [N1_ID, M9_ID, M6_ID], f"batch must be exactly [n1,m9,m6]: {ids2}"
+    assert _manifest_line_count(brief2) == 3, "the batch cap (3) must hold on run 2"
 
     state2 = json.loads(state_path.read_text(encoding="utf-8"))
     inbox2 = state2["cursors"]["INBOX"]
     assert inbox2["new"]["last_message_id"] == N1_ID  # new.last_date = ts(n1)
     deferred_ids2 = [d["message_id"] for d in state2["deferred"]]
-    assert deferred_ids2 == [M10_ID]  # m10 is the only remaining overflow
+    assert deferred_ids2 == [M10_ID]  # m10 is the only remaining overflow (re-injected next run)
+
+
+# --------------------------------------------------------------------------- #
+# 4b. Cross-folder new mail is never starved (Task 5b regression pin)          #
+# --------------------------------------------------------------------------- #
+def test_cross_folder_new_mail_not_starved(tmp_path, monkeypatch):
+    """FRESH world, MAX_BATCH=3: a second folder's NEW mail (b1) lands in the batch — pass 1
+    collects all folders' new mail globally newest-first and unbounded, so INBOX's history
+    cannot starve it.
+
+    Under the Task 5 per-folder single-pass code this FAILS: INBOX is walked first and its
+    history consumes the shared kept budget before ORBIT's b1 is collected → b1 starved
+    (absent from the batch). This test pins the fix.
+    """
+    base = tmp_path / "crossfolder"
+    mail_root = base / "mail"
+    index_path = base / "index"
+    work_dir = base / "work"
+
+    # Corpus: the INBOX fixture set + a second triage folder (INBOX/ORBIT) with 4 in-window
+    # history messages (o1..o4, 2026 dates below the INBOX history) + 1 NEW message b1.
+    _build_maildir(mail_root)
+
+    def _orbit_msg(mid: str, date_line: str, subject: str) -> str:
+        return f"""From: Orbit Sender <{mid.split("@")[0]}@orbit.example.test>
+To: someone@example.test
+Subject: {subject}
+Message-Id: <{mid}>
+Date: {date_line}
+Content-Type: text/plain; charset=utf-8
+
+An ORBIT message.
+"""
+
+    for mid, date_line in [
+        ("o1@fixture.test", "Mon, 01 Jun 2026 09:00:00 +0000"),
+        ("o2@fixture.test", "Mon, 08 Jun 2026 09:00:00 +0000"),
+        ("o3@fixture.test", "Mon, 15 Jun 2026 09:00:00 +0000"),
+        ("o4@fixture.test", "Mon, 22 Jun 2026 09:00:00 +0000"),
+    ]:
+        _write_message(
+            "INBOX/ORBIT",
+            f"{mid.split('@')[0]}.eml",
+            _orbit_msg(mid, date_line, f"Orbit {mid}"),
+            mail_root,
+        )
+    # b1: NEW in ORBIT (Oct 22 — after the INBOX new mail m3 on Oct 21).
+    _write_message(
+        "INBOX/ORBIT",
+        "b1.eml",
+        _orbit_msg(B1_ID, "Tue, 22 Oct 2026 09:00:00 +0000", "Orbit new b1"),
+        mail_root,
+    )
+
+    _build_index(index_path, mail_root, work_dir)
+
+    monkeypatch.setenv("MAIL_INDEX_DB", str(index_path))
+    monkeypatch.setenv("MAIL_MAIL_ROOT", str(mail_root))
+    monkeypatch.setenv("MAIL_OWNER_ADDRESS", OWNER)
+    log_path = tmp_path / "processed-log.jsonl"
+    monkeypatch.setenv("MAIL_PROCESSED_LOG", str(log_path))
+    monkeypatch.setattr(mail_keeper, "MAX_BATCH", 3)
+
+    fake1 = _FakeRunner(_ok_result("cross-folder run 1 (no table)"))
+    ctx1 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake1,
+    )
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+
+    brief1 = fake1.calls[0]["brief"]
+    ids1 = _manifest_ids_from_brief(brief1)
+    # b1 (ORBIT new mail) MUST be in the batch — it is collected in pass 1 (all folders' new
+    # mail, unbounded), so INBOX's history cannot starve it. Under the Task 5 per-folder
+    # single-pass code, INBOX's history would consume the shared kept budget before ORBIT's b1
+    # was ever collected → b1 would be absent (deferred). This is the regression pin.
+    assert B1_ID in ids1, f"b1 must not be starved by INBOX's history: {ids1}"
+    # The batch respects the cap and is newest-first within the pool order.
+    assert len(ids1) == 3, f"batch must respect MAX_BATCH=3: {ids1}"
+
+
+# --------------------------------------------------------------------------- #
+# 4c. Per-folder frontier advances (Task 5b)                                   #
+# --------------------------------------------------------------------------- #
+def test_per_folder_frontier_advances(tmp_path, monkeypatch):
+    """Run 1 (new-kind → back stays floor), then run 2 (history batch → INBOX back = ts(m10));
+    a folder absent from the batch keeps both boundaries.
+
+    Uses MAX_BATCH=3 so run 1 delivers only [m3,m2,m1] (all new-kind) and defers m9/m6/m10 —
+    leaving them UNPROCESSED so run 2's history re-walk (not log-filtered) delivers them as the
+    batch. This is the scenario the spec describes; with the default MAX_BATCH=10, run 1 would
+    deliver all 6 and run 2 would be a no-new-mail run (the m9/m6/m10 re-walk is processed-log
+    filtered — see test_run_two_no_new_mail_hist_filtered_by_log).
+    """
+    base = tmp_path / "frontier"
+    mail_root = base / "mail"
+    index_path = base / "index"
+    work_dir = base / "work"
+
+    _build_maildir(mail_root)
+    # No second folder with in-window mail: the spec's run-2 batch is exactly the INBOX history
+    # [m9,m6,m10], so every other triage folder stays empty (absent from both batches). The
+    # absent-folder invariant is verified on INBOX/ORBIT (stays at the floor, empty id).
+    _build_index(index_path, mail_root, work_dir)
+
+    monkeypatch.setenv("MAIL_INDEX_DB", str(index_path))
+    monkeypatch.setenv("MAIL_MAIL_ROOT", str(mail_root))
+    monkeypatch.setenv("MAIL_OWNER_ADDRESS", OWNER)
+    log_path = tmp_path / "processed-log.jsonl"
+    monkeypatch.setenv("MAIL_PROCESSED_LOG", str(log_path))
+    monkeypatch.setattr(mail_keeper, "MAX_BATCH", 3)
+
+    # Run 1 (fresh state, MAX_BATCH=3): batch = [m3,m2,m1] (all new-kind); deferred [m9,m6,m10].
+    fake1 = _FakeRunner(_ok_result("frontier run 1 (no table)"))
+    ctx1 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake1,
+    )
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+
+    state_path = tmp_path / "state" / "mail-keeper.json"
+    st1 = json.loads(state_path.read_text(encoding="utf-8"))
+    floor = st1["backfill_floor"]
+    inbox1 = st1["cursors"]["INBOX"]
+    # Run 1: all new-kind → back stays at the floor; new = ts(m3).
+    assert inbox1["back"]["last_date"] == floor, "run 1 batch is all new-kind → back stays floor"
+    assert inbox1["new"]["last_message_id"] == M3_ID
+
+    # Run 2: no new mail → batch = the INBOX history below ts(m3), newest-first [m9, m6, m10].
+    fake2 = _FakeRunner(_ok_result("frontier run 2 (no table)"))
+    ctx2 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake2,
+    )
+    result2 = _run_workflow(ctx2)
+    assert result2.status == "ok"
+
+    brief2 = fake2.calls[0]["brief"]
+    ids2 = _manifest_ids_from_brief(brief2)
+    assert ids2 == [M9_ID, M6_ID, M10_ID], f"run 2 batch must be the INBOX history: {ids2}"
+
+    st2 = json.loads(state_path.read_text(encoding="utf-8"))
+    inbox2 = st2["cursors"]["INBOX"]
+    # INBOX back advanced to ts(m10) (the history batch's min); new unchanged (ts(m3)).
+    assert inbox2["back"]["last_message_id"] == M10_ID, "INBOX back must advance to ts(m10)"
+    assert inbox2["back"]["last_date"] < inbox1["new"]["last_date"]
+    assert inbox2["new"]["last_message_id"] == M3_ID, "INBOX new unchanged"
+
+    # A folder NOT in the batch (ORBIT) keeps both boundaries (unchanged across runs 1→2).
+    orbit1_cur = st1["cursors"]["INBOX/ORBIT"]
+    orbit2 = st2["cursors"]["INBOX/ORBIT"]
+    assert orbit2 == orbit1_cur, "a folder absent from the batch must keep both boundaries"
 
 
 # --------------------------------------------------------------------------- #

@@ -754,6 +754,15 @@ def test_mail_keeper_backfill_batch_one(tmp_path: Path, monkeypatch: pytest.Monk
     assert by_id[M6_ID]["target_section"] == "noise"
     assert by_id[M10_ID]["target_section"] == "noise"
 
+    # State after run 1: the batch is all new-kind (fresh state, ts > 0), so INBOX's back
+    # frontier stays at the floor and new = ts(m3). The history advances only from a later run.
+    state_file = w["state"] / "mail-keeper.json"
+    st1 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert st1["cursors"]["INBOX"]["back"]["last_date"] == st1["backfill_floor"], (
+        "run 1 batch is all new-kind → INBOX back stays at the floor"
+    )
+    assert st1["cursors"]["INBOX"]["new"]["last_message_id"] == M3_ID
+
     # Vault: provenance edits + todo line + draft.
     meetings_path = w["vault"] / "projects" / "ORBIT" / "00_Project_management" / "01_Meetings.md"
     meetings = meetings_path.read_text(encoding="utf-8")
