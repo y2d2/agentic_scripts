@@ -42,6 +42,10 @@ Files & spec: `work_plan_task_4_smoke_readme.md`. New `tests/smoke/test_smoke_ma
 Files & spec: `work_plan_task_5_backfill_newest_first.md`. Per the user decision of 2026-10-23 (Note 14): rewrite the detection/state of `src/agentic_scripts/workflows/mail_keeper.py` from the single-forward-cursor/oldest-first model to a **two-boundary model** (per folder: `new` = newest-seen forward boundary, `back` = oldest-processed backward frontier) with a fixed **1-year `backfill_floor`** (first-run now − 365 d, stored); per-run merge order = **new mail first, then deferred, then history newest-first** (≤10/run); per-folder completion when the frontier reaches the floor (history walk then skipped); v1 state schema guard (clear error, no auto-migration — the repo state is FRESH, nothing to migrate); updated fixtures + order-sensitive tests (`tests/test_mail_keeper.py`, `tests/smoke/test_smoke_mail_keeper.py`: `m8` >1-yr-old floor-exclusion message, `m9`/`m10` multi-run backfill, explicit timestamps, newest-first run-1 batch, new-mail-not-starved test with `MAX_BATCH` monkeypatched to 3, schema-guard test); README backfill paragraph rewritten (measured window ≈ 3,500 messages ≈ ~350 runs).
 **Depends on:** Tasks 3 + 4 (the module and tests it rewrites). **Blocks:** the live-acceptance runs.
 
+### Task 5b: Batch cap, cross-folder new-first, true per-folder frontier
+Files & spec: `work_plan_task_5b_batch_cap_frontier.md`. Orchestrator code review of Task 5 found three contract violations the fixture tests could not see: (1) the previous run's `deferred` is appended ON TOP of the manifest → the agent can receive up to 20 messages/run (cap re-application required), (2) per-folder single-pass collection → INBOX's backfill history can starve new mail in smaller folders for the whole INBOX backfill (two-pass global new-first collection required), (3) `back` pinned at the floor (min-rule) + global max/min applied to every folder's cursor → late-phase re-walk cost (~3.5k shows/run in the tail) + per-folder boundary corruption (true per-folder frontier: `new_f` = max over the folder's batch entries, `back_f` = min over the folder's history-kind entries, absent folders unchanged). The KEPT-entry budget (correct in Task 5) stays. New regression tests: cross-folder new-mail priority, per-folder frontier advance, cap re-application.
+**Depends on:** Task 5. **Blocks:** the live-acceptance runs.
+
 ## Parallel blocks
 
 | Wave | Tasks | Rationale |
@@ -49,7 +53,7 @@ Files & spec: `work_plan_task_5_backfill_newest_first.md`. Per the user decision
 | 1 | 1 ∥ 2 | Disjoint files; Task 2 writes one markdown file outside the repo (no commit, no repo conflict) |
 | 2 | 3 | Imports Task 1's `canary` module; single agent (shared `config/workflows.yaml`) |
 | 3 | 4 | Smoke exercises the whole module; touches README/.env/config-verification only after Task 3 |
-| 4 | 5 | Backfill redesign (user decision 2026-10-23); touches only the `mail_keeper` module + its two test files + the README backfill paragraph |
+| 4 | 5 ∥ 5b | 5: backfill redesign (user decision 2026-10-23). 5b: follow-up fixes found by orchestrator code review of 5's implementation (batch cap re-application, cross-folder new-first, true per-folder frontier) — dispatched to the same dev session after 5 verified |
 | acceptance | (manual) | Live-acceptance protocol (Note 8, as revised) only after Task 5 verifies — user approves each run |
 
 ## Out of Scope
@@ -89,6 +93,6 @@ Files & spec: `work_plan_task_5_backfill_newest_first.md`. Per the user decision
 
 - Sub-agent: `@lightweight-dev` for every task (implementation + tests + self-verification + `OC:` commit + push of the task's files only).
 - Per-task dispatch inputs: (1) the task file path below, (2) the exact result filename, (3) the task number.
-- Result files: `lightweight_dev_task_1_mail_search_cli.md`, `lightweight_dev_task_2_email_routes.md`, `lightweight_dev_task_3_workflow_core.md`, `lightweight_dev_task_4_smoke_readme.md`, `lightweight_dev_task_5_backfill_newest_first.md`.
+- Result files: `lightweight_dev_task_1_mail_search_cli.md`, `lightweight_dev_task_2_email_routes.md`, `lightweight_dev_task_3_workflow_core.md`, `lightweight_dev_task_4_smoke_readme.md`, `lightweight_dev_task_5_backfill_newest_first.md` (Task 5b appends to the Task 5 result file).
 - Orchestrator verifies each result's acceptance table before dispatching the next wave. Retry limit 2 per task, then structured escalation to user.
 - Archive (implementation-plan skill) only after the final report and explicit user confirmation.
