@@ -46,6 +46,10 @@ Files & spec: `work_plan_task_5_backfill_newest_first.md`. Per the user decision
 Files & spec: `work_plan_task_5b_batch_cap_frontier.md`. Orchestrator code review of Task 5 found three contract violations the fixture tests could not see: (1) the previous run's `deferred` is appended ON TOP of the manifest → the agent can receive up to 20 messages/run (cap re-application required), (2) per-folder single-pass collection → INBOX's backfill history can starve new mail in smaller folders for the whole INBOX backfill (two-pass global new-first collection required), (3) `back` pinned at the floor (min-rule) + global max/min applied to every folder's cursor → late-phase re-walk cost (~3.5k shows/run in the tail) + per-folder boundary corruption (true per-folder frontier: `new_f` = max over the folder's batch entries, `back_f` = min over the folder's history-kind entries, absent folders unchanged). The KEPT-entry budget (correct in Task 5) stays. New regression tests: cross-folder new-mail priority, per-folder frontier advance, cap re-application.
 **Depends on:** Task 5. **Blocks:** the live-acceptance runs.
 
+### Task 5c: Base reader decode fix (acceptance blocker)
+Files & spec: `work_plan_task_5c_reader_decode.md`. Acceptance Run 1 (2026-10-24 08:13 UTC) failed in 40 s: base `reader._run` decodes notmuch output as strict UTF-8 (`text=True`), but this notmuch build emits message bodies raw into `show` JSON — a recent latin-1 mail (FARI/Unitree thread) crashed the run before state save → would block the backfill forever. Fix: byte capture + UTF-8 → latin-1 lossless fallback in `NotmuchReader._run` + additive latin-1 regression test in `tests/test_mail_reader.py`. One-hunk base-file change, accepted as an acceptance-test blocker fix (recorded here).
+**Depends on:** Task 5b. **Blocks:** acceptance Run 1 re-run.
+
 ## Parallel blocks
 
 | Wave | Tasks | Rationale |
