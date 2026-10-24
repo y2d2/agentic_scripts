@@ -405,6 +405,18 @@ def _manifest_line_count(brief: str) -> int:
     return count
 
 
+# msg-id → epoch seconds for the fixture INBOX messages (the deterministic dates above). Used to
+# assert global-newest-first ordering without re-deriving timestamps from the index.
+ts_of = {
+    M3_ID: 1792580400,  # Mon, 21 Oct 2026 11:00:00 +0000
+    M2_ID: 1792576800,  # Mon, 21 Oct 2026 10:00:00 +0000
+    M1_ID: 1792573200,  # Mon, 21 Oct 2026 09:00:00 +0000
+    M9_ID: 1789462800,  # Mon, 15 Sep 2026 09:00:00 +0000
+    M6_ID: 1786957200,  # Mon, 17 Aug 2026 09:00:00 +0000
+    M10_ID: 1783933200,  # Mon, 13 Jul 2026 09:00:00 +0000
+}
+
+
 def _run_workflow(ctx: WorkContext) -> object:
     """Run the mail-keeper workflow once against ``ctx``."""
     wf = mail_keeper.create(ctx.config)
@@ -444,10 +456,15 @@ def test_run_one_fresh_state_newest_first(hermetic_mail, tmp_path, monkeypatch):
     assert Path(call["work_dir"]) == ctx.admin_repo
     brief = call["brief"]
 
-    # Manifest is [m3, m2, m1, m9, m6, m10] newest-first; PII (m4) + own (m5) + pre-floor
-    # (m8) all excluded. notmuch's natural order is newest-first — pinned here.
+    # Manifest is the 6 newest KEPT messages GLOBALLY (ts desc); PII (m4) + own (m5) + pre-floor
+    # (m8) all excluded. Task 5f: the pool is sorted globally newest-first before the cap, so a
+    # fresh bootstrap's batch is the global newest set and its order is descending by timestamp.
     ids = _manifest_ids_from_brief(brief)
     assert ids == [M3_ID, M2_ID, M1_ID, M9_ID, M6_ID, M10_ID]
+    ts_order = [ts_of[i] for i in ids]
+    assert ts_order == sorted(ts_order, reverse=True), (
+        "batch must be globally newest-first (ts desc)"
+    )
     assert "MANIFEST (6 message(s)):" in brief
     assert M4_ID not in brief
     assert M5_ID not in brief
@@ -730,13 +747,17 @@ A new message that must not be starved by the pending backfill.
 # 4b. Cross-folder new mail is never starved (Task 5b regression pin)          #
 # --------------------------------------------------------------------------- #
 def test_cross_folder_new_mail_not_starved(tmp_path, monkeypatch):
-    """FRESH world, MAX_BATCH=3: a second folder's NEW mail (b1) lands in the batch — pass 1
-    collects all folders' new mail globally newest-first and unbounded, so INBOX's history
-    cannot starve it.
+    """MAX_BATCH=3: a second folder's GENUINELY-NEW mail (b1) lands in the batch even though a
+    large folder's history is pending — pass 1 collects new-mail folders' ``new_set`` UNBOUNDED,
+    so INBOX's bounded history cannot starve it.
 
-    Under the Task 5 per-folder single-pass code this FAILS: INBOX is walked first and its
-    history consumes the shared kept budget before ORBIT's b1 is collected → b1 starved
-    (absent from the batch). This test pins the fix.
+    Task 5f adjustment (recorded): under Change 1 a FRESH-frontier folder's mail routes to the
+    BOUNDED history pass, so b1 must arrive AFTER run 1 — when INBOX's new frontier has advanced
+    past m3 — for b1 to be genuinely NEW (ts > ORBIT's new.last_date) and thus protected by the
+    unbounded pass. This is exactly the "new mail never starved" invariant; a fresh-frontier
+    folder's backfill is bounded by design (that is what kills the Run-1 deferred explosion).
+    Under the Task 5 per-folder single-pass code this still FAILS: INBOX's history would consume
+    the shared kept budget before ORBIT's b1 was collected → b1 starved. This test pins the fix.
     """
     base = tmp_path / "crossfolder"
     mail_root = base / "mail"
@@ -744,7 +765,7 @@ def test_cross_folder_new_mail_not_starved(tmp_path, monkeypatch):
     work_dir = base / "work"
 
     # Corpus: the INBOX fixture set + a second triage folder (INBOX/ORBIT) with 4 in-window
-    # history messages (o1..o4, 2026 dates below the INBOX history) + 1 NEW message b1.
+    # history messages (o1..o4, 2026 dates below the INBOX history). b1 is added AFTER run 1.
     _build_maildir(mail_root)
 
     def _orbit_msg(mid: str, date_line: str, subject: str) -> str:
@@ -770,13 +791,6 @@ An ORBIT message.
             _orbit_msg(mid, date_line, f"Orbit {mid}"),
             mail_root,
         )
-    # b1: NEW in ORBIT (Oct 22 — after the INBOX new mail m3 on Oct 21).
-    _write_message(
-        "INBOX/ORBIT",
-        "b1.eml",
-        _orbit_msg(B1_ID, "Tue, 22 Oct 2026 09:00:00 +0000", "Orbit new b1"),
-        mail_root,
-    )
 
     _build_index(index_path, mail_root, work_dir)
 
@@ -787,6 +801,8 @@ An ORBIT message.
     monkeypatch.setenv("MAIL_PROCESSED_LOG", str(log_path))
     monkeypatch.setattr(mail_keeper, "MAX_BATCH", 3)
 
+    # Run 1 (fresh state, MAX_BATCH=3): INBOX batch [m3,m2,m1]; ORBIT's o1..o4 are bounded
+    # history (fresh frontier → deferred). INBOX's new frontier advances to ts(m3).
     fake1 = _FakeRunner(_ok_result("cross-folder run 1 (no table)"))
     ctx1 = _make_ctx(
         tmp_path,
@@ -797,15 +813,35 @@ An ORBIT message.
     result1 = _run_workflow(ctx1)
     assert result1.status == "ok"
 
-    brief1 = fake1.calls[0]["brief"]
-    ids1 = _manifest_ids_from_brief(brief1)
-    # b1 (ORBIT new mail) MUST be in the batch — it is collected in pass 1 (all folders' new
-    # mail, unbounded), so INBOX's history cannot starve it. Under the Task 5 per-folder
-    # single-pass code, INBOX's history would consume the shared kept budget before ORBIT's b1
-    # was ever collected → b1 would be absent (deferred). This is the regression pin.
-    assert B1_ID in ids1, f"b1 must not be starved by INBOX's history: {ids1}"
-    # The batch respects the cap and is newest-first within the pool order.
-    assert len(ids1) == 3, f"batch must respect MAX_BATCH=3: {ids1}"
+    # Add b1 (Oct 22 — NEWER than INBOX's new frontier ts(m3)=Oct 21) to ORBIT and re-index.
+    # Now b1 is genuinely NEW in ORBIT (ts > ORBIT's new.last_date=0).
+    _write_message(
+        "INBOX/ORBIT",
+        "b1.eml",
+        _orbit_msg(B1_ID, "Tue, 22 Oct 2026 09:00:00 +0000", "Orbit new b1"),
+        mail_root,
+    )
+    _build_index(index_path, mail_root, tmp_path / "reindex")
+
+    # Run 2: b1 (ORBIT NEW mail) MUST be in the batch — it is collected in pass 1 (new-mail
+    # folders' new_set, UNBOUNDED), so INBOX's bounded history cannot starve it. Under the Task 5
+    # per-folder single-pass code, INBOX's history would consume the shared kept budget before
+    # ORBIT's b1 was ever collected → b1 would be absent (deferred). This is the regression pin.
+    fake2 = _FakeRunner(_ok_result("cross-folder run 2 (no table)"))
+    ctx2 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake2,
+    )
+    result2 = _run_workflow(ctx2)
+    assert result2.status == "ok"
+
+    brief2 = fake2.calls[0]["brief"]
+    ids2 = _manifest_ids_from_brief(brief2)
+    assert B1_ID in ids2, f"b1 must not be starved by INBOX's history: {ids2}"
+    # The batch respects the cap.
+    assert len(ids2) == 3, f"batch must respect MAX_BATCH=3: {ids2}"
 
 
 # --------------------------------------------------------------------------- #
@@ -884,6 +920,168 @@ def test_per_folder_frontier_advances(tmp_path, monkeypatch):
     orbit1_cur = st1["cursors"]["INBOX/ORBIT"]
     orbit2 = st2["cursors"]["INBOX/ORBIT"]
     assert orbit2 == orbit1_cur, "a folder absent from the batch must keep both boundaries"
+
+
+# --------------------------------------------------------------------------- #
+# 4d. Fresh bootstrap: deferred is capped (Task 5f — kills the Run-1 explosion) #
+# --------------------------------------------------------------------------- #
+def test_fresh_bootstrap_deferred_capped(tmp_path, monkeypatch):
+    """FRESH world, MAX_BATCH=3: run 1 batch = 3 newest globally; deferred ≤ MAX_BATCH.
+
+    Before Task 5f a fresh bootstrap routed the whole in-window backlog through the UNBOUNDED
+    new pass → ~2,680 entries into deferred_new (the Run-1 state explosion). After the fix, a
+    fresh-frontier folder's mail is backfill → the BOUNDED history pass, so deferred_new stays
+    ≤ MAX_BATCH. A second _detect (next run) re-picks up exactly deferred_new's head minus
+    processed — no loss, no dupe. Uses its own isolated corpus (not the shared module fixture).
+    """
+    base = tmp_path / "freshcap"
+    mail_root = base / "mail"
+    index_path = base / "index"
+    work_dir = base / "work"
+
+    _build_maildir(mail_root)
+    _build_index(index_path, mail_root, work_dir)
+
+    monkeypatch.setenv("MAIL_INDEX_DB", str(index_path))
+    monkeypatch.setenv("MAIL_MAIL_ROOT", str(mail_root))
+    monkeypatch.setenv("MAIL_OWNER_ADDRESS", OWNER)
+    log_path = tmp_path / "processed-log.jsonl"
+    monkeypatch.setenv("MAIL_PROCESSED_LOG", str(log_path))
+    monkeypatch.setattr(mail_keeper, "MAX_BATCH", 3)
+
+    # Run 1 (fresh state, MAX_BATCH=3): batch = the 3 newest KEPT globally; deferred ≤ 3.
+    fake1 = _FakeRunner(_ok_result("freshcap run 1 (no table)"))
+    ctx1 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake1,
+    )
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+
+    brief1 = fake1.calls[0]["brief"]
+    ids1 = _manifest_ids_from_brief(brief1)
+    # The 3 newest KEPT messages globally (m3, m2, m1 — all INBOX; no other folder has mail).
+    assert ids1 == [M3_ID, M2_ID, M1_ID], f"run 1 batch must be the 3 newest globally: {ids1}"
+
+    state_path = tmp_path / "state" / "mail-keeper.json"
+    st1 = json.loads(state_path.read_text(encoding="utf-8"))
+    deferred_ids1 = [d["message_id"] for d in st1["deferred"]]
+    # The load-bearing assertion: the fresh-bootstrap backlog is CAPPED (not ~2,680 entries).
+    assert len(deferred_ids1) <= 3, (
+        f"fresh-bootstrap deferred must be ≤ MAX_BATCH=3: {deferred_ids1}"
+    )
+    # The kept overflow is exactly [m9, m6, m10] (the next-newest history after the batch), in
+    # global-newest-first order. Pre-Task-5f this was the ENTIRE unbounded backlog (~2,680 live);
+    # pinning it to the capped kept set proves the explosion is gone.
+    assert deferred_ids1 == [M9_ID, M6_ID, M10_ID], (
+        f"deferred should be the capped kept overflow [m9,m6,m10]: {deferred_ids1}"
+    )
+
+    # Run 2: no new mail → batch = deferred re-injected + history re-walk, deduped, capped. The
+    # head of run-1's deferred (m9) is re-presented first; no loss (m10 still reachable), no dupe.
+    fake2 = _FakeRunner(_ok_result("freshcap run 2 (no table)"))
+    ctx2 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake2,
+    )
+    result2 = _run_workflow(ctx2)
+    assert result2.status == "ok"
+
+    brief2 = fake2.calls[0]["brief"]
+    ids2 = _manifest_ids_from_brief(brief2)
+    # No loss: the deferred head (m9) is re-presented; no dupe: each id appears once.
+    assert M9_ID in ids2, f"run 1's deferred head m9 must be re-presented on run 2: {ids2}"
+    assert len(ids2) == len(set(ids2)), f"no duplicates in the batch: {ids2}"
+    assert len(ids2) <= 3, f"run 2 batch must respect MAX_BATCH=3: {ids2}"
+
+
+# --------------------------------------------------------------------------- #
+# 4e. Pool is globally newest-first across folders (Task 5f — Change 2)        #
+# --------------------------------------------------------------------------- #
+def test_pool_global_newest_first_order(tmp_path, monkeypatch):
+    """Two folders with interleaved dates → batch order is GLOBAL (90,80,70,60), not per-folder.
+
+    Before Task 5f the pool was per-folder-block ordered (folder A's rows then folder B's), so a
+    folder's older mail could sit ahead of another folder's newer mail. After Change 2 the pool is
+    sorted globally newest-first (ts desc, id tie-break) before the cap. Uses its own isolated
+    corpus with two triage folders (INBOX + INBOX/ORBIT) and interleaved in-window dates.
+    """
+    base = tmp_path / "globalorder"
+    mail_root = base / "mail"
+    index_path = base / "index"
+    work_dir = base / "work"
+
+    def _msg(mid: str, date_line: str, subject: str) -> str:
+        return f"""From: Sender <{mid.split("@")[0]}@fixture.test>
+To: someone@example.test
+Subject: {subject}
+Message-Id: <{mid}>
+Date: {date_line}
+Content-Type: text/plain; charset=utf-8
+
+A message.
+"""
+
+    # INBOX (folder A): ts 90 (a1, Oct 20) and ts 70 (a2, Sep 15).
+    _write_message(
+        "INBOX",
+        "a1.eml",
+        _msg("a1@fixture.test", "Sun, 20 Oct 2026 09:00:00 +0000", "A one"),
+        mail_root,
+    )
+    _write_message(
+        "INBOX",
+        "a2.eml",
+        _msg("a2@fixture.test", "Mon, 15 Sep 2026 09:00:00 +0000", "A two"),
+        mail_root,
+    )
+    # INBOX/ORBIT (folder B): ts 80 (b2, Oct 10) and ts 60 (b4, Aug 15). Interleaved with A.
+    _write_message(
+        "INBOX/ORBIT",
+        "b2.eml",
+        _msg("b2@fixture.test", "Thu, 08 Oct 2026 09:00:00 +0000", "B two"),
+        mail_root,
+    )
+    _write_message(
+        "INBOX/ORBIT",
+        "b4.eml",
+        _msg("b4@fixture.test", "Mon, 17 Aug 2026 09:00:00 +0000", "B four"),
+        mail_root,
+    )
+    # A Sent Items message is required for the canary spot-check (own-mail → excluded from
+    # detection, so it does not affect the batch-ordering assertion).
+    _write_message("Sent Items", "m5.eml", M5, mail_root)
+
+    _build_index(index_path, mail_root, work_dir)
+
+    monkeypatch.setenv("MAIL_INDEX_DB", str(index_path))
+    monkeypatch.setenv("MAIL_MAIL_ROOT", str(mail_root))
+    monkeypatch.setenv("MAIL_OWNER_ADDRESS", OWNER)
+    log_path = tmp_path / "processed-log.jsonl"
+    monkeypatch.setenv("MAIL_PROCESSED_LOG", str(log_path))
+    # MAX_BATCH=4 so all four in-window messages fit the batch (the ordering is the assertion).
+    monkeypatch.setattr(mail_keeper, "MAX_BATCH", 4)
+
+    fake = _FakeRunner(_ok_result("globalorder run 1 (no table)"))
+    ctx = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake,
+    )
+    result = _run_workflow(ctx)
+    assert result.status == "ok"
+
+    ids = _manifest_ids_from_brief(fake.calls[0]["brief"])
+    # GLOBAL newest-first: a1 (Oct 20) > b2 (Oct 8) > a2 (Sep 15) > b4 (Aug 17). NOT A-block
+    # then B-block (which would be a1, a2, b2, b4).
+    assert ids == ["a1@fixture.test", "b2@fixture.test", "a2@fixture.test", "b4@fixture.test"], (
+        f"batch must be globally newest-first across folders: {ids}"
+    )
 
 
 # --------------------------------------------------------------------------- #

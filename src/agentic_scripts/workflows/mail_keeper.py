@@ -581,10 +581,15 @@ def _detect(
         kept as documentation). The candidate pool is then built in three passes over ALL
         folders so new mail in a small folder is never starved by a large folder's history:
 
-        - **Pass 1** — every folder's ``new_set`` (folder order, each newest-first);
+        - **Pass 1** — every folder's ``new_set`` (UNBOUNDED only for folders with an advanced
+          frontier, ``new_last > 0``; a fresh-frontier folder's mail is backfill → bounded
+          history pass);
         - **Pass 1.5** — the previous run's ``deferred`` re-injected (already-kept entries: no
           re-``show``, de-duplicated by id) so cap-overflow mail is never lost;
         - **Pass 2** — every folder's ``hist_set`` (folder order, each newest-first).
+
+        The pool is sorted globally newest-first (ts desc, id tie-break) before the cap is
+        applied, so the batch is the true global newest-first across new/deferred/history.
 
         The global KEPT-entry budget (``2 * MAX_BATCH`` margin for exclusions) bounds the walk.
         It is applied to history only: pass 1 collects ALL new mail unbounded (newest-first), so
@@ -598,8 +603,8 @@ def _detect(
         ``max(back.last_date, floor)`` AND it is not from the owner AND its folder is not under
         the PII prefix AND its id is not already in the processed log (the permanent floor is
         enforced here — mail below it is never triaged).
-        The batch is ``pool[:MAX_BATCH]`` (merge order = pool order: all new first, then
-        deferred, then all history); ``deferred_new = pool[MAX_BATCH:]`` (re-injected next run).
+        The batch is the globally-newest-first ``pool[:MAX_BATCH]`` (the pool is sorted ts-desc,
+        id tie-break, before the cap); ``deferred_new = pool[MAX_BATCH:]`` (re-injected next run).
 
     Args:
         reader: The configured :class:`NotmuchReader` over the target index.
@@ -697,22 +702,33 @@ def _detect(
             rows = reader.search(q_folder(account, folder), limit=10**9)
         except NotmuchError:
             raise  # a per-folder search failure is a business error for the run wrapper
-        new_set = [row for row in rows if int(row.get("timestamp", 0)) > new_last_date]
-        if back_last_date < floor:
-            hist_set: list[dict] = []  # truly complete → skip the history walk (defensive)
+        if new_last_date == 0:
+            # Folder's new frontier has never advanced: it has no "new" mail — its entire
+            # in-window mail is backfill. Route it to the bounded history pass so a fresh
+            # bootstrap cannot flood the pool/deferred with the whole backlog. The floor
+            # lower bound is enforced inside _collect (lower_bound = max(back, floor)).
+            new_set: list[dict] = []
+            hist_set = list(rows)
         else:
-            hist_set = [
-                row
-                for row in rows
-                if back_last_date < int(row.get("timestamp", 0)) <= new_last_date
-            ]
+            new_set = [row for row in rows if int(row.get("timestamp", 0)) > new_last_date]
+            if back_last_date < floor:
+                hist_set = []  # truly complete → skip the history walk (defensive)
+            else:
+                hist_set = [
+                    row
+                    for row in rows
+                    if back_last_date < int(row.get("timestamp", 0)) <= new_last_date
+                ]
         new_sets.append((folder, new_set, back_last_date))
         hist_sets.append((folder, hist_set, back_last_date))
 
     # Pass 1: every folder's new mail, collected UNBOUNDED and ordered GLOBALLY newest-first
     # across folders (not per-folder) — a small folder's NEW mail can never be displaced by a
     # large folder's older "new" mail, so new mail is never starved (the user-confirmed
-    # invariant). The pool order here is the batch order for new mail.
+    # invariant). Only folders with an advanced frontier (new_last > 0) contribute here; a
+    # fresh-frontier folder's mail is routed to the bounded history pass instead. The final
+    # pool is re-sorted globally newest-first before the cap (see below), so this pass order
+    # only affects which candidates are gathered, not their batch position.
     all_new_rows: list[tuple[dict, str, int]] = []
     for folder, new_set, back_last_date in new_sets:
         for row in new_set:
@@ -734,6 +750,12 @@ def _detect(
     for folder, hist_set, back_last_date in hist_sets:
         _collect(hist_set, folder, back_last_date, bounded=True)
 
+    # Sort the pool GLOBALLY newest-first (ts desc, id tie-break) BEFORE the cap is applied:
+    # this makes the batch the true global newest-first across new/deferred/history and drains
+    # the deferred queue in recency order. A genuinely-new arrival always beats older history;
+    # a new arrival OLDER than current history is ordered by recency (not lost — it stays in
+    # the pool/deferred and is processed in order).
+    pool.sort(key=lambda e: (-int(e["timestamp"]), e["message_id"]))
     batch = pool[:MAX_BATCH]
     deferred_new = [dict(c) for c in pool[MAX_BATCH:]]
     return batch, deferred_new
@@ -911,6 +933,11 @@ class MailKeeper:
         # new.last_date — no kind field needed). Folders absent from the batch keep both
         # boundaries. Invariant: back.last_date never drops below the floor (every kept ts is
         # strictly > the previous frontier ≥ floor).
+        # Known quirk (documented, NOT fixed): a folder's FIRST batched entries (old new_last = 0)
+        # advance `new`, not `back` — so its back stays at the floor until the SECOND touch. From
+        # the second touch onward back tracks correctly. Harmless: the processed log + re-collection
+        # keep correctness, and the backfill-complete guard is defensive-only (it never fires under
+        # the strict filter). See Task 5f in the result report.
         new_cursors = {folder: dict(entry) for folder, entry in cursors.items()}
         for folder in TRIAGE_FOLDERS:
             if _folder_under_pii(folder) or folder in EXCLUDED_FOLDERS:

@@ -331,3 +331,70 @@ Requiring the `file:line` citation makes a claimed skip verifiable (the confabul
 
 - Result file only: `OC: Task 5e: skill hardening notes (full msg-ids; cited dedup evidence)` on
   `plan/agentic-workflows` (commit hash recorded below by the orchestrator's push).
+
+---
+
+# Task 5f — Pool ordering + fresh-frontier routing (Run-2 finding)
+
+## Run-2 finding
+
+Acceptance **Run 2** (2026-10-24 16:22 UTC, `status=ok`) left `state/mail-keeper.json` with
+**`deferred` = 2,672 entries / 978 KB**. Root cause in `_detect`:
+
+1. **Fresh-frontier folders flood the pool as "new".** For any folder whose `new.last_date == 0`
+   (never batched — all folders on a fresh bootstrap), the old code computed
+   `new_set = [rows with ts > 0]` = the folder's ENTIRE in-window mail, and pass 1 collected it
+   **unbounded** → Run 1 put ~2,680 entries into `deferred_new`, re-injected + re-deferred every run.
+2. **The pool was per-folder-block ordered, not globally newest-first.** The docstring claimed
+   "ordered GLOBALLY newest-first across folders" but the code only appended per folder — so INBOX
+   July-2026 history sat behind April-2026 other-folder mail (the opposite of the user's recency intent).
+
+## Changes (in `src/agentic_scripts/workflows/mail_keeper.py::_detect`)
+
+1. **Fresh-frontier folders route to the bounded history pass.** Branch on `new_last_date == 0`:
+   such a folder has no "new" mail — its entire in-window mail is backfill → `new_set = []`,
+   `hist_set = list(rows)` (the floor bound is enforced inside `_collect`). Non-fresh folders keep the
+   exact split. This kills the Run-1 deferred explosion.
+2. **Sort the pool globally newest-first before the cap.** `pool.sort(key=lambda e: (-int(e["timestamp"]), e["message_id"]))`
+   BEFORE `batch = pool[:MAX_BATCH]` — the batch is now the true global newest-first across
+   new/deferred/history, and the deferred queue drains in recency order (id tie-break for determinism).
+
+Docstrings updated: `_detect` pass-1 bullet (unbounded only for advanced-frontier folders), merge-order
+bullet (pool sorted globally before the cap), the ~712–715 comment reworded to reference the sort, and a
+**known-quirk note** in `_run` step (c) — a folder's FIRST batched entries (old new_last = 0) advance `new`,
+not `back`; from the second touch onward `back` tracks correctly. Harmless (processed log + re-collection
+keep correctness; the backfill-complete guard is defensive-only). Documented, NOT fixed.
+
+## Test deltas (`tests/test_mail_keeper.py`)
+
+- **Updated `test_run_one_fresh_state_newest_first`** — added a global-newest-first assertion (batch ts
+  descending) via a new `ts_of` msg-id→epoch helper; the batch is still `[m3,m2,m1,m9,m6,m10]` (all INBOX).
+- **Updated `test_cross_folder_new_mail_not_starved`** — see the conflict note below.
+- **New `test_fresh_bootstrap_deferred_capped`** — fresh world, MAX_BATCH=3: run 1 batch = `[m3,m2,m1]`,
+  deferred = exactly `[m9,m6,m10]` (≤ MAX_BATCH, capped — not ~2,680); run 2 re-picks up the deferred head
+  (m9) with no loss / no dupe.
+- **New `test_pool_global_newest_first_order`** — two folders with interleaved dates (INBOX a1/a2; ORBIT
+  b2/b4) → batch order `[a1, b2, a2, b4]` (global), NOT A-block then B-block.
+
+### Test-2 adjustment (fixture/expectation conflict — recorded per spec)
+
+Under Change 1, a **fresh-frontier** folder's mail routes to the bounded history pass, so a second
+folder's mail present at bootstrap is bounded by design and can be starved when INBOX (walked first) fills
+the `2*MAX_BATCH` budget. The no-starvation invariant (new mail unbounded) protects only folders with an
+**advanced** frontier (`new_last > 0`). So the test was reshaped: **b1 now arrives AFTER run 1** (when
+INBOX's new frontier has advanced past m3), making b1 genuinely NEW in ORBIT and thus protected by the
+unbounded pass. This is exactly the "new mail never starved" invariant; a fresh-frontier folder's backfill
+being bounded is intentional (it is what kills the Run-1 explosion). All invariants still hold: no loss, no
+dupe, new mail (advanced frontier) never starved, ≤ MAX_BATCH/run, floor.
+
+## Build / test
+
+- `uv run pytest -q` → **111 passed** (no ignores) — up from 109 (the two new tests).
+- `uv run ruff check .` clean; `uv run ruff format --check .` clean for the two code files. (The spec file
+  `work_plan_task_5f_pool_order.md` is flagged by ruff-format over a python code block in its body —
+  pre-existing, tracked+unmodified, not in this commit's file set.)
+
+## Commit
+
+- Exactly `src/agentic_scripts/workflows/mail_keeper.py` + `tests/test_mail_keeper.py` + this result file;
+  `OC:`-prefixed; pushed to `plan/agentic-workflows` (commit hash recorded by the orchestrator's push).
