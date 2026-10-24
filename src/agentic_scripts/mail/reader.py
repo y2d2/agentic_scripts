@@ -487,7 +487,9 @@ class NotmuchReader:
             timeout: Per-invocation wall-clock limit in seconds.
 
         Returns:
-            The command's stdout as a string.
+            The command's stdout as a string. Decoded as UTF-8; on a decode error it falls
+            back to latin-1 (lossless — it maps all 256 bytes), because this notmuch build
+            emits raw message bodies into ``show --format=json`` and some carry non-UTF-8 bytes.
 
         Raises:
             NotmuchError: On non-zero exit (message includes the exit code and stderr
@@ -498,16 +500,19 @@ class NotmuchReader:
             proc = subprocess.run(
                 [self._bin] + args,
                 capture_output=True,
-                text=True,
                 env=self._env,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise NotmuchError(op, "timeout", "") from exc
         if proc.returncode != 0:
-            tail = (proc.stderr or "").strip()[-500:]
+            tail = (proc.stderr or b"").decode("utf-8", "replace").strip()[-500:]
             raise NotmuchError(op, proc.returncode, tail)
-        return proc.stdout
+        out = proc.stdout or b""
+        try:
+            return out.decode("utf-8")
+        except UnicodeDecodeError:
+            return out.decode("latin-1")  # lossless fallback: latin-1 maps all 256 bytes
 
     def count(self, query: str = "") -> int:
         """Return the number of messages matching ``query`` (all if empty).

@@ -33,6 +33,8 @@ M1_ID = "m1@example.com"
 M2_ID = "m2@example.com"
 M3_ID = "m3@example.com"
 M4_ID = "m4@example.com"
+# Task 5c: a latin-1 body (raw 0xe9 bytes) for the decode-fallback test.
+LATIN1_ID = "latin1@example.com"
 
 # The four fixture messages. m1/m3 are plain text from Alice; m2 is HTML-only from
 # Bob (its body part carries only content-length, so the reader must fall back to the
@@ -332,6 +334,61 @@ def test_read_only_contract(hermetic_mail):
 
     after = {p: p.stat().st_mtime_ns for p in files}
     assert before == after, "reader mutated maildir mtimes (read-only contract violated)"
+
+
+# --------------------------------------------------------------------------- #
+# Task 5c: latin-1 body decode fallback (acceptance blocker)                  #
+# --------------------------------------------------------------------------- #
+def test_show_latin1_body_fallback(tmp_path_factory):
+    """A message whose body carries raw latin-1 bytes decodes to proper ``é`` via show/body_text.
+
+    Purpose:
+        This notmuch 0.38.3 build emits message bodies RAW into ``show --format=json`` (the
+        HTML-body gap), and a live message carried a latin-1 ``0xe9`` that crashed the reader's
+        strict UTF-8 decode (acceptance Run 1, 2026-10-24). The fix decodes stdout as UTF-8 with
+        a lossless latin-1 fallback. This test writes a message with an explicit latin-1 body
+        (raw ``b"r\\xe9sum\\xe9"`` bytes — NOT utf-8) into a throwaway maildir, indexes it, and
+        asserts both ``show`` and ``body_text`` succeed and the body contains the decoded ``é``.
+
+    Rationale:
+        Built in its own isolated corpus (not the shared module fixture) so the non-UTF-8 bytes
+        never pollute the other tests' index. The UTF-8 path is already covered by the existing
+        tests (not duplicated here).
+    """
+    base = tmp_path_factory.mktemp("hermetic_latin1")
+    mail_root = base / "mail"
+    index_path = base / "notmuch-index"
+    work_dir = base / "work"
+
+    # Build the .eml with EXPLICIT latin-1 bytes in the body (r\xe9sum\xe9 = "résumé"). The
+    # headers are ASCII so only the body carries non-UTF-8 (0xe9) bytes.
+    cur = mail_root / ACCOUNT / "cur"
+    cur.mkdir(parents=True, exist_ok=True)
+    body = b"""From: Latin Sender <latin@example.com>
+To: someone@example.com
+Subject: latin one
+Message-Id: <latin1@example.com>
+Date: Tue, 20 Oct 2026 14:00:00 +0000
+Content-Type: text/plain; charset=iso-8859-1
+
+r\xe9sum\xe9 body marker.
+"""
+    (cur / "latin1.eml").write_bytes(body)
+
+    _build_index(index_path, mail_root, work_dir)
+    reader = NotmuchReader(index_path=index_path, mail_root=mail_root, work_dir=work_dir)
+
+    # show() must succeed (no UnicodeDecodeError) and carry the decoded é.
+    doc = reader.show(LATIN1_ID)
+    assert doc["primary"]["id"] == LATIN1_ID
+    raw_text = repr(doc["raw"])
+    assert "\u00e9" in raw_text, "show() body must contain the decoded é (U+00E9)"
+
+    # body_text() must succeed and return the plain text with the decoded é.
+    text, path = reader.body_text(LATIN1_ID)
+    assert path is None
+    assert text is not None
+    assert "\u00e9" in text, f"body_text() body must contain the decoded é, got: {text!r}"
 
 
 # --------------------------------------------------------------------------- #
