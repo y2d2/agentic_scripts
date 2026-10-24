@@ -1,27 +1,37 @@
-"""The ``mail-keeper`` workflow: index-freshness canary, backfill-aware new-mail
-detection, a ≤10-message manifest, one batched agent invocation, the runner-owned
-processed log, and mail-backup byte-identity verification.
+"""The ``mail-keeper`` workflow: index-freshness canary, newest-first backfill-aware
+new-mail detection (two-boundary cursors + a fixed 1-year floor), a ≤10-message manifest,
+one batched agent invocation, the runner-owned processed log, and mail-backup
+byte-identity verification.
 
 Purpose:
     Provide :func:`create` (the scheduler's entry point) returning a
     :class:`MailKeeper` that, on each gate-open (or ``--force``) run, verifies the
     notmuch index against the maildir (canary; report-and-defer on staleness), detects
-    mail newer than the per-folder cursors — first runs carry epoch-0 cursors, i.e. the
-    user-confirmed **history backfill** (the whole index is triaged oldest-first in
-    capped batches until the cursors reach the present) — builds a ≤:data:`MAX_BATCH`
-    manifest (PII folder + own mail excluded *before* the agent), invokes the
-    ``mail-keeper`` agent exactly once with that manifest, and — only on an ``ok`` agent
-    result — advances the cursors, appends the v1-schema processed log, and verifies the
-    mail backup tree is byte-identical before and after.
+    candidates per triage folder using a **two-boundary cursor** — ``new`` = newest-seen
+    forward boundary, ``back`` = oldest-processed backward frontier — plus a fixed
+    **1-year backfill floor** captured at first run (mail older than the floor is never
+    triaged). Each run's manifest fills **newest-first**: new mail first, then deferred
+    overflow, then history newest-first, capped at :data:`MAX_BATCH`. The workflow builds
+    the ≤:data:`MAX_BATCH` manifest (PII folder + own mail excluded *before* the agent),
+    invokes the ``mail-keeper`` agent exactly once with that manifest, and — only on an
+    ``ok`` agent result — advances the cursors (manifest min/max), appends the v1-schema
+    processed log, and verifies the mail backup tree is byte-identical before and after.
 
 Rationale:
-    The runner owns everything around the agent: freshness, state (cursors + deferred),
-    manifest building, the single agent call, the processed log, and the guardrail check.
-    The agent owns only triage + vault writes + its own commit/push (see the global
-    ``skills/mail-keeper`` skill). This split is what makes re-runs idempotent: an agent
-    failure advances nothing, so the same batch is re-presented next run and the agent's
-    dedup rule (grep msg-id before every write) makes re-delivery safe. The workflow
-    NEVER writes vault files, NEVER sends mail, and NEVER runs ``notmuch new``.
+    The runner owns everything around the agent: freshness, state (two-boundary cursors +
+    floor + deferred), manifest building, the single agent call, the processed log, and
+    the guardrail check. The agent owns only triage + vault writes + its own commit/push
+    (see the global ``skills/mail-keeper`` skill). This split is what makes re-runs
+    idempotent: an agent failure advances nothing, so the same batch is re-presented next
+    run and the agent's dedup rule (grep msg-id before every write) makes re-delivery
+    safe. The workflow NEVER writes vault files, NEVER sends mail, and NEVER runs
+    ``notmuch new``.
+
+    Backfill model (user decision 2026-10-23): history is processed **newest-first**
+    (notmuch's natural row order — no reversal) in capped batches until every folder's
+    ``back`` frontier reaches the floor; a folder whose backfill is complete skips the
+    history walk entirely (steady state = new-mail-only runs). Newly arriving mail is
+    never starved because each run fills its batch with new mail first.
 
 Environment (read at run time; env wins over the defaults below):
     MAIL_INDEX_DB       notmuch index dir   (default /workspace/docker/mbsync/notmuch)
@@ -49,6 +59,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -71,6 +82,10 @@ from agentic_scripts.workflows.base import WorkflowResult
 #: Per-run manifest cap — the user-confirmed history-backfill throughput knob. Cap-
 #: truncated messages live in ``state.deferred`` and are re-injected next run (no loss).
 MAX_BATCH = 10
+
+#: The fixed backfill floor window: a folder's history is triaged only down to
+#: ``first-run-now − BACKFILL_WINDOW_SECONDS``; mail older than the floor is never triaged.
+BACKFILL_WINDOW_SECONDS = 365 * 86400
 
 #: The PII folder, excluded from detection/manifest/drafts/commits by default. Any
 #: folder under this prefix is also excluded (defense in depth on top of the loop).
@@ -291,12 +306,13 @@ def _render_brief(run_id: str, manifest: list[dict], owner: str) -> str:
     Purpose:
         Produce the single batched invocation's message: a header naming the run and the
         batch size, the skill pointer + final-report mandate, and the ``MANIFEST`` block
-        with one numbered line per entry (date-ascending). The format is load-bearing —
-        the agent reads it by eye — so it must stay byte-stable.
+        with one numbered line per entry in merge order (new mail first, then deferred,
+        then history newest-first). The format is load-bearing — the agent reads it by
+        eye — so it must stay byte-stable.
 
     Args:
         run_id: The unique run identifier for this invocation.
-        manifest: The (already date-ascending) list of manifest entries.
+        manifest: The list of manifest entries in merge order (new mail first).
         owner: The owner address (carried in the brief header for context).
 
     Returns:
@@ -305,7 +321,7 @@ def _render_brief(run_id: str, manifest: list[dict], owner: str) -> str:
     n = len(manifest)
     lines = [
         f"mail-keeper run {run_id} — triage the new-mail manifest below "
-        f"(batch of {n}, date-ascending).",
+        f"(batch of {n}, newest-first).",
         "Follow skill: mail-keeper (run, triage, vault fills, drafts, commit policy). "
         "Your final message must be the result report with the Triage table "
         "(| msg-id | folder | from | class | action taken |).",
@@ -449,34 +465,98 @@ def _save_state(ctx: Any, data: dict) -> None:
     ctx.state.save(_STATE_KEY, data)
 
 
-def _default_cursor() -> dict:
-    """Return the epoch-0 cursor used for a folder with no recorded progress.
+def _fresh_state(now: int, floor: int) -> dict:
+    """Build the fresh-state document for a first run (state v2 schema).
 
     Purpose:
-        Absent cursors are epoch 0 — this is what implements the user-confirmed history
-        backfill: on first runs every triage folder's cursor is ``{"last_date": 0, ...}``,
-        so the whole index becomes the candidate set and is triaged oldest-first.
-
-    Returns:
-        ``{"last_date": 0, "last_message_id": None}``.
-    """
-    return {"last_date": 0, "last_message_id": None}
-
-
-def _cursor_for(cursors: dict, folder: str) -> dict:
-    """Return the cursor for ``folder``, defaulting to epoch-0 when absent.
+        On the very first run there is no recorded progress. The two-boundary model starts
+        every triage folder at ``new = {last_date: 0, ...}`` (so run 1's ``new_set`` is
+        everything) and ``back = {last_date: floor, ...}`` (so the backward frontier begins
+        exactly at the floor and only moves down to processed-min). The fixed
+        ``backfill_floor`` is captured once here and never recomputed.
 
     Args:
-        cursors: The state's ``cursors`` mapping (may be empty on first runs).
-        folder: A triage folder path.
+        now: The current integer epoch (used for ``bootstrapped_at``).
+        floor: The backfill floor in epoch seconds (``now − BACKFILL_WINDOW_SECONDS``).
 
     Returns:
-        The folder's cursor dict, or :func:`_default_cursor` when the folder has none.
+        A fresh state dict with keys ``bootstrapped_at``, ``backfill_floor``, ``cursors``
+        (one two-boundary entry per triage folder), and an empty ``deferred`` list.
     """
-    cur = cursors.get(folder)
-    if isinstance(cur, dict) and "last_date" in cur:
-        return cur
-    return _default_cursor()
+    cursors: dict[str, dict] = {}
+    for folder in TRIAGE_FOLDERS:
+        if _folder_under_pii(folder) or folder in EXCLUDED_FOLDERS:
+            continue  # PII + own corpus are never searched (defense in depth)
+        cursors[folder] = {
+            "new": {"last_date": 0, "last_message_id": ""},
+            "back": {"last_date": floor, "last_message_id": ""},
+        }
+    return {
+        "bootstrapped_at": datetime.fromtimestamp(now, tz=UTC).isoformat(),
+        "backfill_floor": floor,
+        "cursors": cursors,
+        "deferred": [],
+    }
+
+
+def _validate_state(st: dict) -> str | None:
+    """Validate a loaded state document against the v2 schema.
+
+    Purpose:
+        The repo has no v1 state to migrate (verified 2026-10-23), so a mismatched shape is
+        an operator error, not something to auto-migrate. A v1-shaped entry (a folder cursor
+        that is a flat ``{last_date, ...}`` dict rather than the two-boundary
+        ``{new, back}`` mapping) or a missing ``backfill_floor`` must surface as a clear,
+        actionable error telling the operator to delete the state file.
+
+    Args:
+        st: The parsed state document (possibly empty on a first run).
+
+    Returns:
+        An error message string when the shape is invalid, else None. The message contains
+        ``"state schema mismatch"`` and the instruction ``"delete state/mail-keeper.json"``.
+    """
+    if not st:
+        return None  # no state yet → first run (the caller initialises it)
+    if "backfill_floor" not in st:
+        return (
+            "state schema mismatch: 'backfill_floor' is missing — delete "
+            "state/mail-keeper.json and let the workflow re-bootstrap."
+        )
+    cursors = st.get("cursors", {}) or {}
+    for folder, entry in cursors.items():
+        if not (isinstance(entry, dict) and "new" in entry and "back" in entry):
+            return (
+                f"state schema mismatch: folder {folder!r} has a v1-shaped cursor "
+                "(missing the two-boundary 'new'/'back' keys) — delete "
+                "state/mail-keeper.json and let the workflow re-bootstrap."
+            )
+    return None
+
+
+def _cursor_for(cursors: dict, folder: str, floor: int) -> tuple[dict, dict]:
+    """Return a folder's two-boundary cursors, defaulting to the fresh-state shape.
+
+    Purpose:
+        A triage folder absent from ``cursors`` (e.g. added after bootstrap) is treated as
+        freshly initialised: ``new = {last_date: 0}`` and ``back = {last_date: floor}``.
+        Existing entries are returned as-is (the v2 shape was validated by the caller).
+
+    Args:
+        cursors: The state's ``cursors`` mapping.
+        folder: A triage folder path.
+        floor: The backfill floor in epoch seconds (for fresh defaults).
+
+    Returns:
+        A ``(new_cursor, back_cursor)`` tuple of ``{last_date, last_message_id}`` dicts.
+    """
+    entry = cursors.get(folder)
+    if isinstance(entry, dict) and "new" in entry and "back" in entry:
+        return entry["new"], entry["back"]
+    return (
+        {"last_date": 0, "last_message_id": ""},
+        {"last_date": floor, "last_message_id": ""},
+    )
 
 
 def _detect(
@@ -485,107 +565,136 @@ def _detect(
     account: str,
     owner: str,
     cursors: dict,
+    floor: int,
     processed_ids: set[str],
 ) -> tuple[list[dict], list[dict]]:
-    """Detect new-mail candidates per triage folder and build the manifest + deferred.
+    """Detect candidates per triage folder and build the merged manifest + deferred.
 
     Purpose:
-        The core of detection (spec step 4): for each triage folder with its cursor, run
-        ONE ``search`` (no year prefix — the backfill spans all years), keep thread rows
-        newer than the cursor, walk them OLDEST-FIRST collecting each thread's message-ids,
-        and per candidate id run ONE ``show`` to recover the requested message object
-        (the notmuch 0.38.3 thread-root quirk). A message is kept iff its timestamp is
-        strictly newer than the cursor AND it is not from the owner AND its folder is not
-        under the PII prefix AND its id is not already in the processed log. The first
-        ``MAX_BATCH`` kept entries form the manifest; kept-but-over-cap entries become
-        ``deferred_new`` (re-injected next run so cap-truncated mail is never starved).
+        The core of detection (spec steps 1–8): for each triage folder with its two-boundary
+        cursors, run ONE ``search`` (no year prefix — notmuch's natural row order is
+        **newest-first**, used directly, no reversal). Rows are split into ``new_set``
+        (``ts > new.last_date``) and ``hist_set`` (``back.last_date < ts <= new.last_date``),
+        EXCEPT when the folder's backfill is complete (``back.last_date <= floor``), in which
+        case ``hist_set = []`` (sound: every message in ``(floor, new]`` was already
+        evaluated — kept ⇒ in the processed log, or excluded ⇒ permanently owner/PII). The
+        merged pool is ``new_set + deferred + hist_set`` (deferred re-injected by the caller),
+        de-duplicated by message id; each candidate id gets ONE ``show`` to recover the
+        requested message object (the notmuch 0.38.3 thread-root quirk). A message is kept
+        iff its timestamp is strictly greater than ``back.last_date`` AND it is not from the
+        owner AND its folder is not under the PII prefix AND its id is not already in the
+        processed log. The first ``MAX_BATCH`` kept entries (in merge order) form the
+        manifest; kept-but-over-cap entries become ``deferred_new`` (re-injected next run so
+        cap-truncated mail is never starved).
 
     Args:
         reader: The configured :class:`NotmuchReader` over the target index.
         mail_root: The resolved maildir root (for folder derivation from filenames).
         account: The single top-level account directory name.
         owner: The owner address (case-insensitive) — own-mail exclusion.
-        cursors: The state's ``cursors`` mapping (epoch-0 for absent folders = backfill).
+        cursors: The state's ``cursors`` mapping (two-boundary ``{new, back}`` per folder).
+        floor: The fixed backfill floor in epoch seconds (from the state document).
         processed_ids: The set of already-processed message-ids (de-dup source).
 
     Returns:
-        A ``(manifest, deferred_new)`` tuple: the date-ascending manifest (≤ MAX_BATCH)
-        and the list of kept-but-over-cap entries (the next run's deferred).
+        A ``(manifest, deferred_new)`` tuple: the manifest in merge order (≤ MAX_BATCH) and
+        the list of kept-but-over-cap entries (the next run's deferred).
 
     Side Effects:
-        Read-only notmuch ``search``/``show`` calls (≤ ~20 shows per run by design). No
-        writes. A ``NotmuchError`` on a single ``show`` is logged and that id skipped.
+        Read-only notmuch ``search``/``show`` calls (one per candidate id, bounded by the
+        global ``2 * MAX_BATCH`` kept-entry budget). No writes. A ``NotmuchError`` on a
+        single ``show`` is logged and that id skipped.
     """
     owner_lc = owner.lower()
-    # Collect candidates oldest-first across all triage folders, then sort globally so the
-    # manifest is date-ascending regardless of folder interleaving.
+    # Merge-order candidate pool: new mail first, then deferred (re-injected by the caller),
+    # then history newest-first. De-duplicated by message id (deferred is re-injected so
+    # cap-overflow mail is never lost; processed-log ids are filtered in the show walk). All
+    # in-window candidates are gathered (newest-first) and capped at the END — there is no
+    # per-folder early-stop, which would truncate history before it is collected. A global
+    # budget on KEPT entries (2 * MAX_BATCH margin for exclusions) bounds worst-case cost;
+    # deferred + overflow already account for cap-overflow mail.
     candidates: list[dict] = []
     seen_ids: set[str] = set()
+
+    def _collect(row_set: list[dict], folder: str, back_last_date: int) -> None:
+        """Walk ``row_set`` (newest-first) and append kept candidate entries to the pool.
+
+        Per id: ONE ``show`` to recover the requested message object (the thread-root quirk),
+        then keep iff ``ts > back.last_date`` AND not own-mail AND not under PII AND not in
+        the processed log. A single bad ``show`` is logged and skipped (never aborts). The
+        global budget on kept entries stops the walk once enough candidates are gathered.
+        """
+        for row in row_set:
+            if len(candidates) >= 2 * MAX_BATCH:
+                return
+            for msg_id in row.get("message_ids", []):
+                if msg_id in seen_ids:
+                    continue
+                seen_ids.add(msg_id)
+                try:
+                    doc = reader.show(msg_id)
+                except NotmuchError as exc:
+                    print(f"mail-keeper: skipping {msg_id}: {exc}")  # noqa: T201 - diagnostic
+                    continue
+                msg = _find_message_by_id(doc, msg_id) or doc["primary"]
+                epoch = msg.get("timestamp")
+                if not isinstance(epoch, int) or epoch <= back_last_date:
+                    continue  # strict > back frontier (the floor is enforced via this bound)
+                headers = msg.get("headers") or {}
+                from_header = str(headers.get("From", ""))
+                if owner_lc in from_header.lower():
+                    continue  # own mail is excluded (style sampling only, never triaged)
+                filename = msg.get("filename")
+                folder_of_msg = (
+                    _folder_from_filename(filename[0], mail_root, account)
+                    if isinstance(filename, list) and filename
+                    else ""
+                )
+                if _folder_under_pii(folder_of_msg):
+                    continue  # defense in depth: the loop already excluded this folder
+                if msg_id in processed_ids:
+                    continue  # already triaged in a previous run (primary history dedup)
+                candidates.append(
+                    {
+                        "message_id": msg_id,
+                        "folder": folder_of_msg or folder,
+                        "timestamp": epoch,
+                        "from": from_header,
+                        "from_addresses": _parse_from_addresses(from_header),
+                        "subject": str(headers.get("Subject", "")),
+                    }
+                )
 
     for folder in TRIAGE_FOLDERS:
         if _folder_under_pii(folder) or folder in EXCLUDED_FOLDERS:
             continue  # PII + own corpus are never searched (defense in depth)
-        cursor = _cursor_for(cursors, folder)
-        last_date = int(cursor.get("last_date", 0))
+        new_cur, back_cur = _cursor_for(cursors, folder, floor)
+        new_last_date = int(new_cur.get("last_date", 0))
+        back_last_date = int(back_cur.get("last_date", 0))
         try:
             rows = reader.search(q_folder(account, folder), limit=10**9)
         except NotmuchError:
             raise  # a per-folder search failure is a business error for the run wrapper
-        # Keep thread rows newer than the cursor, ordered OLDEST-FIRST (notmuch's default
-        # search order is newest-first — reverse it; the test suite pins this assumption).
-        kept_rows = [row for row in rows if int(row.get("timestamp", 0)) > last_date]
-        kept_rows.sort(key=lambda r: int(r.get("timestamp", 0)))
+        # notmuch's natural row order is newest-first — used directly (no reversal; the test
+        # suite pins this assumption). Split into new_set / hist_set on the two boundaries.
+        new_set = [row for row in rows if int(row.get("timestamp", 0)) > new_last_date]
+        # Backfill-complete skip: a folder is truly complete only once its frontier has moved
+        # BELOW the floor (a batch reached below it). While back.last_date == floor (the fresh
+        # start, or a batch whose min sits exactly on the floor) the history walk still runs —
+        # otherwise in-window mail would be wrongly dropped. Re-walked mail is de-duplicated by
+        # the processed log / owner / PII filters, so this is safe and cheap. (Deviation from
+        # the spec's `back.last_date <= floor` check — see the result report.)
+        if back_last_date < floor:
+            hist_set: list[dict] = []  # truly complete → skip the history walk entirely
+        else:
+            hist_set = [
+                row
+                for row in rows
+                if back_last_date < int(row.get("timestamp", 0)) <= new_last_date
+            ]
+        _collect(new_set, folder, back_last_date)
+        _collect(hist_set, folder, back_last_date)
 
-        # Walk oldest-first threads, collecting each thread's message-ids fully (threads
-        # are small) until we have enough candidates (2*MAX_BATCH margin for exclusions).
-        thread_ids: list[str] = []
-        for row in kept_rows:
-            for msg_id in row.get("message_ids", []):
-                if msg_id not in seen_ids:
-                    seen_ids.add(msg_id)
-                    thread_ids.append(msg_id)
-            if len(thread_ids) >= 2 * MAX_BATCH:
-                break
-
-        # Per candidate id, ONE show to recover the requested message object (quirk).
-        for msg_id in thread_ids:
-            try:
-                doc = reader.show(msg_id)
-            except NotmuchError as exc:
-                # A single bad message must not abort the run — skip and continue.
-                print(f"mail-keeper: skipping {msg_id}: {exc}")  # noqa: T201 - diagnostic
-                continue
-            msg = _find_message_by_id(doc, msg_id) or doc["primary"]
-            epoch = msg.get("timestamp")
-            if not isinstance(epoch, int) or epoch <= last_date:
-                continue  # strict > cursor (same-second arrivals are a documented limit)
-            headers = msg.get("headers") or {}
-            from_header = str(headers.get("From", ""))
-            if owner_lc in from_header.lower():
-                continue  # own mail is excluded (style sampling only, never triaged)
-            filename = msg.get("filename")
-            folder_of_msg = (
-                _folder_from_filename(filename[0], mail_root, account)
-                if isinstance(filename, list) and filename
-                else ""
-            )
-            if _folder_under_pii(folder_of_msg):
-                continue  # defense in depth: the loop already excluded this folder
-            if msg_id in processed_ids:
-                continue  # already triaged in a previous run
-            candidates.append(
-                {
-                    "message_id": msg_id,
-                    "folder": folder_of_msg or folder,
-                    "timestamp": epoch,
-                    "from": from_header,
-                    "from_addresses": _parse_from_addresses(from_header),
-                    "subject": str(headers.get("Subject", "")),
-                }
-            )
-
-    # Date-ascending globally (stable on message-id for ties).
-    candidates.sort(key=lambda c: (c["timestamp"], c["message_id"]))
     manifest = candidates[:MAX_BATCH]
     deferred_new = [dict(c) for c in candidates[MAX_BATCH:]]
     return manifest, deferred_new
@@ -611,12 +720,13 @@ class MailKeeper:
 
         Purpose:
             Execute the full pipeline: precheck (admin_repo + index readable), canary
-            (stale → report-and-defer, never lose), state load (epoch-0 cursors = backfill
-            on first runs), detection (per-folder search + oldest-first show walk with
-            PII/own/processed exclusions), manifest build (≤ MAX_BATCH, date-ascending),
-            pre-backup snapshot, one agent invocation, and — only on ``ok`` — triage-class
-            parse, processed-log append, cursor advance, deferred clear, and post-backup
-            byte-identity check.
+            (stale → report-and-defer, never lose), state load (v2 two-boundary cursors +
+            fixed 1-year floor; a v1-shaped state is a hard error), detection (per-folder
+            search + newest-first show walk with PII/own/processed exclusions), manifest
+            build (≤ MAX_BATCH, merge order: new mail first, then deferred, then history
+            newest-first), pre-backup snapshot, one agent invocation, and — only on ``ok`` —
+            triage-class parse, processed-log append, cursor advance (manifest min/max),
+            deferred clear, and post-backup byte-identity check.
 
         Args:
             ctx: The shared :class:`~agentic_scripts.workflows.base.WorkContext`.
@@ -690,44 +800,43 @@ class MailKeeper:
         if not canary_res["spot_check"]["ok"]:
             errors.append(f"canary spot-check failed: {canary_res['spot_check']['note']}")
 
-        # --- 3. State: cursors (epoch-0 = backfill) + deferred. --- #
+        # --- 3. State: v2 two-boundary cursors + fixed floor + deferred. --- #
         st = _read_state(ctx)
-        cursors = st.get("cursors", {}) or {}
-        deferred: list[dict] = st.get("deferred", []) or []
+        schema_err = _validate_state(st)
+        if schema_err is not None:
+            return WorkflowResult(status="error", errors=[schema_err])
 
         first_run = "bootstrapped_at" not in st
         if first_run:
-            backfill_total = 0
-            for folder in TRIAGE_FOLDERS:
-                if _folder_under_pii(folder) or folder in EXCLUDED_FOLDERS:
-                    continue
-                try:
-                    backfill_total += reader.count(q_folder(account, folder))
-                except NotmuchError as exc:
-                    errors.append(f"backfill count failed for {folder}: {exc}")
-            st["bootstrapped_at"] = datetime.now(UTC).isoformat()
+            now = int(time.time())
+            floor = now - BACKFILL_WINDOW_SECONDS
+            st = _fresh_state(now, floor)
             actions.append(
-                f"first run: backfilling {backfill_total} indexed message(s) oldest-first"
+                f"first run: backfilling newest-first down to the 1-year floor "
+                f"({BACKFILL_WINDOW_SECONDS // 86400} days)"
             )
 
-        # --- 4. Detection (per-folder search + oldest-first show walk). --- #
+        cursors = st.get("cursors", {}) or {}
+        floor = int(st.get("backfill_floor", 0))
+        deferred: list[dict] = st.get("deferred", []) or []
+
+        # --- 4. Detection (per-folder search + newest-first show walk). --- #
         processed_ids = _load_processed_log_ids(processed_log)
-        manifest, deferred_new = _detect(reader, mail_root, account, owner, cursors, processed_ids)
+        manifest, deferred_new = _detect(
+            reader, mail_root, account, owner, cursors, floor, processed_ids
+        )
 
-        # Prepend the previous deferred entries (de-duplicated) before the fresh
-        # candidates so cap-truncated mail is never starved.
-        fresh_ids = {e["message_id"] for e in manifest}
+        # Merge order: new mail first, then deferred (re-injected so cap-overflow is never
+        # lost), then history newest-first — the de-dup by message id happens inside _detect.
         merged: list[dict] = []
-        for entry in deferred:
-            if entry.get("message_id") not in fresh_ids and entry.get("message_id") not in {
-                m["message_id"] for m in merged
-            }:
+        seen_merged: set[str] = set()
+        for entry in [*manifest, *deferred]:
+            msg_id = entry.get("message_id")
+            if msg_id and msg_id not in seen_merged:
+                seen_merged.add(msg_id)
                 merged.append(entry)
-        merged.extend(manifest)
-        # Re-sort the merged list date-ascending (deferred may predate fresh mail).
-        merged.sort(key=lambda c: (c.get("timestamp", 0), c.get("message_id", "")))
 
-        # --- 5. Manifest empty → no agent call; persist state; return ok. --- #
+        # --- 5. Merged pool empty → no agent call; persist state; return ok. --- #
         if not merged:
             st["deferred"] = deferred_new
             _save_state(ctx, st)
@@ -760,28 +869,45 @@ class MailKeeper:
         # (a) Append processed-log records for EVERY manifest entry.
         appended = _append_processed_log(processed_log, merged, classes)
 
-        # (c) Advance cursors: per folder, last_date = max of the batch's timestamps in
-        # that folder, last_message_id = that newest id; folders with no batch members keep
-        # their cursor. deferred is cleared to deferred_new (cap-truncated mail).
-        new_cursors = dict(cursors)
-        for entry in merged:
-            folder = entry["folder"]
-            ts = int(entry.get("timestamp", 0))
-            cur = new_cursors.get(folder, _default_cursor())
-            if ts > int(cur.get("last_date", 0)):
-                new_cursors[folder] = {"last_date": ts, "last_message_id": entry["message_id"]}
+        # (c) Advance cursors (only on ok + non-empty manifest): the manifest min/max across
+        # ALL members (kind-agnostic) keeps each boundary a true "everything above/below was
+        # evaluated" frontier and makes deferred-overflow re-presentation safe. Invariant:
+        # back.last_date never drops below the floor (every kept ts > the previous frontier).
+        manifest_ts = [int(e.get("timestamp", 0)) for e in merged]
+        max_ts = max(manifest_ts)
+        min_ts = min(manifest_ts)
+        newest_entry = next(e for e in merged if int(e.get("timestamp", 0)) == max_ts)
+        oldest_entry = next(e for e in merged if int(e.get("timestamp", 0)) == min_ts)
+        new_cursors: dict[str, dict] = {}
+        for folder in TRIAGE_FOLDERS:
+            if _folder_under_pii(folder) or folder in EXCLUDED_FOLDERS:
+                continue
+            new_cur, back_cur = _cursor_for(cursors, folder, floor)
+            new_last = int(new_cur.get("last_date", 0))
+            back_last = int(back_cur.get("last_date", floor))
+            if max_ts > new_last:
+                new_cur = {"last_date": max_ts, "last_message_id": newest_entry["message_id"]}
+            if min_ts < back_last and min_ts >= floor:
+                back_cur = {"last_date": min_ts, "last_message_id": oldest_entry["message_id"]}
+            new_cursors[folder] = {"new": new_cur, "back": back_cur}
         st["cursors"] = new_cursors
         st["deferred"] = deferred_new
 
-        # (d) Persist state (single atomic write).
+        # (d) Backfill-complete log: a folder whose frontier crossed the floor this run.
+        for folder, entry in new_cursors.items():
+            old_back = int(_cursor_for(cursors, folder, floor)[1].get("last_date", floor))
+            if old_back > floor >= int(entry["back"]["last_date"]):
+                actions.append(f"backfill complete for {folder}")
+
+        # (e) Persist state (single atomic write).
         _save_state(ctx, st)
 
-        # (e) Post-walk: byte-identity guardrail check.
+        # (f) Post-walk: byte-identity guardrail check.
         snapshot_after = _backup_snapshot(mail_root)
         if snapshot_before != snapshot_after:
             errors.append("mail backup tree changed during the run (guardrail trip)")
 
-        # (f) Log the agent's result report in full; summarise actions.
+        # (g) Log the agent's result report in full; summarise actions.
         ctx.logger.info("mail-keeper agent final report:\n%s", agent.final_text or "")
         class_summary = ", ".join(sorted(set((classes or {}).values()))) or "unparsed"
         actions.append(f"agent ok ({len(merged)} messages, classes: {class_summary})")

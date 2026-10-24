@@ -1,11 +1,11 @@
-"""Hermetic end-to-end smoke test for the mail-keeper workflow (Task 4).
+"""Hermetic end-to-end smoke test for the mail-keeper workflow (Task 5 — newest-first).
 
 Drives a real forced ``run()`` of the SHIPPED-style config (paths/env pointed at fixtures)
-through the full pipeline — canary, backfill start (first run = oldest batch of the fixture
-history), detection, one agent invocation (a deterministic fake ``opencode`` shim performing
-the agent's contract: provenance-tagged vault edit + todo line + draft + ``OC:`` commit +
-push), processed-log append, cursor advance, backup byte-identity, no-new-mail re-run,
-new-mail-after-backfill, and the agent-failure → retry path.
+through the full pipeline — canary, backfill start (first run = the NEWEST in-window batch
+of the fixture history), detection, one agent invocation (a deterministic fake ``opencode``
+shim performing the agent's contract: provenance-tagged vault edit + todo line + draft +
+``OC:`` commit + push), processed-log append, cursor advance, backup byte-identity,
+no-new-mail re-run, new-mail-after-backfill, and the agent-failure → retry path.
 
 Everything is hermetic: throwaway maildir / notmuch index / vault git repo / bare remote /
 shims under ``tmp_path``; NO real ``opencode``, NO live LLM, and NO writes to the production
@@ -55,43 +55,35 @@ GIT_IDENTITY = {
 }
 
 # --- Fixture message ids ----------------------------------------------------- #
-M6_ID = "m6@fixture.test"  # OLD (~2 months back), INBOX — the backfill anchor (oldest)
-M1_ID = "m1@fixture.test"  # recent, INBOX, plain (Coera) — the "action" message
-M2_ID = "m2@fixture.test"  # recent, INBOX, multipart (Nikos)
-M3_ID = "m3@fixture.test"  # recent, INBOX, HTML-only (Nikos)
-M4_ID = "m4@fixture.test"  # recent, PII folder — must be excluded from the brief
-M5_ID = "m5@fixture.test"  # recent, Sent Items, own mail — must be excluded from the brief
-M7_ID = "m7@fixture.test"  # added by test 3 (newest)
+M3_ID = "m3@fixture.test"  # newest INBOX (Oct 21 11:00), HTML-only (Nikos) — noise
+M2_ID = "m2@fixture.test"  # INBOX (Oct 21 10:00), multipart (Nikos) — noise
+M1_ID = "m1@fixture.test"  # INBOX (Oct 21 09:00), plain (Coera) — the "action" message
+M9_ID = "m9@fixture.test"  # history INBOX (Sep 15) — noise
+M6_ID = "m6@fixture.test"  # history INBOX (Aug 15) — noise
+M10_ID = "m10@fixture.test"  # history INBOX (Jul 15) — noise, oldest in-window
+M8_ID = "m8@fixture.test"  # OLD INBOX (Mar 2025) — OUTSIDE the floor, never triaged
+M4_ID = "m4@fixture.test"  # PII folder — must be excluded from the brief
+M5_ID = "m5@fixture.test"  # Sent Items, own mail — must be excluded from the brief
+M7_ID = "m7@fixture.test"  # added by test 3 (Oct 22)
 
 # --- Fixture message bodies -------------------------------------------------- #
-# m6: OLD (~2 months back), INBOX. Oldest → sorts first in the backfill batch.
-M6 = f"""From: Old Sender <old@fixture.test>
+# m3: newest INBOX (Oct 21 11:00), HTML-only from Nikos — noise.
+M3 = f"""From: Nikos <nikos@orbit.example.test>
 To: someone@example.test
-Subject: Backfill anchor old
-Message-Id: <{M6_ID}>
-Date: Mon, 17 Aug 2026 09:00:00 +0000
-Content-Type: text/plain; charset=utf-8
+Subject: Html three
+Message-Id: <{M3_ID}>
+Date: Mon, 21 Oct 2026 11:00:00 +0000
+Content-Type: text/html; charset=utf-8
 
-An old message that the backfill must pick up first.
+<html><body>HTML-only marker body.</body></html>
 """
 
-# m1: recent (Oct 20), INBOX, plain from Coera — the "action" message.
-M1 = f"""From: Coera <coera@orbit.example.test>
-To: someone@example.test
-Subject: EUG schedule
-Message-Id: <{M1_ID}>
-Date: Tue, 20 Oct 2026 10:00:00 +0000
-Content-Type: text/plain; charset=utf-8
-
-EUG session confirmed; deck due Friday.
-"""
-
-# m2: recent (Oct 20), INBOX, multipart (plain+html) from Nikos — noise.
+# m2: INBOX (Oct 21 10:00), multipart (plain+html) from Nikos — noise.
 M2 = f"""From: Nikos <nikos@orbit.example.test>
 To: someone@example.test
 Subject: Multipart two
 Message-Id: <{M2_ID}>
-Date: Tue, 20 Oct 2026 11:00:00 +0000
+Date: Mon, 21 Oct 2026 10:00:00 +0000
 MIME-Version: 1.0
 Content-Type: multipart/mixed; boundary="BOUNDARY"
 
@@ -106,18 +98,62 @@ Multipart plain marker.
 --BOUNDARY--
 """
 
-# m3: recent (Oct 20), INBOX, HTML-only from Nikos — noise.
-M3 = f"""From: Nikos <nikos@orbit.example.test>
+# m1: INBOX (Oct 21 09:00), plain from Coera — the "action" message.
+M1 = f"""From: Coera <coera@orbit.example.test>
 To: someone@example.test
-Subject: Html three
-Message-Id: <{M3_ID}>
-Date: Tue, 20 Oct 2026 12:00:00 +0000
-Content-Type: text/html; charset=utf-8
+Subject: EUG schedule
+Message-Id: <{M1_ID}>
+Date: Mon, 21 Oct 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
 
-<html><body>HTML-only marker body.</body></html>
+EUG session confirmed; deck due Friday.
 """
 
-# m4: recent (Oct 20), PII folder — excluded from detection/manifest.
+# m9: history INBOX (Sep 15) — noise.
+M9 = f"""From: Sep Sender <sep@fixture.test>
+To: someone@example.test
+Subject: History nine
+Message-Id: <{M9_ID}>
+Date: Mon, 15 Sep 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+A September history message.
+"""
+
+# m6: history INBOX (Aug 15) — noise.
+M6 = f"""From: Aug Sender <aug@fixture.test>
+To: someone@example.test
+Subject: History six
+Message-Id: <{M6_ID}>
+Date: Mon, 17 Aug 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+An August history message.
+"""
+
+# m10: history INBOX (Jul 15) — noise, the oldest in-window message.
+M10 = f"""From: Jul Sender <jul@fixture.test>
+To: someone@example.test
+Subject: History ten
+Message-Id: <{M10_ID}>
+Date: Mon, 13 Jul 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+A July history message (oldest in the window).
+"""
+
+# m8: OLD INBOX (Mar 2025) — OUTSIDE the backfill floor, never triaged.
+M8 = f"""From: Old Sender <old@fixture.test>
+To: someone@example.test
+Subject: Pre-floor old mail
+Message-Id: <{M8_ID}>
+Date: Mon, 17 Mar 2025 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+An old message outside the backfill floor — never triaged.
+"""
+
+# m4: PII folder — excluded from detection/manifest.
 M4 = f"""From: PhD Applicant <phd@fixture.test>
 To: someone@example.test
 Subject: PhD application (PII)
@@ -128,7 +164,7 @@ Content-Type: text/plain; charset=utf-8
 A PII-folder message that must never enter the manifest.
 """
 
-# m5: recent (Oct 20), Sent Items, own mail — excluded (style sampling only).
+# m5: Sent Items, own mail — excluded (style sampling only).
 M5 = f"""From: Yuri Durodie <{OWNER}>
 To: coera@orbit.example.test
 Subject: Own sent mail (style)
@@ -139,12 +175,12 @@ Content-Type: text/plain; charset=utf-8
 Own corpus message for style sampling only.
 """
 
-# m7: newest (Oct 21), INBOX — added by test 3 to exercise new-mail-after-backfill.
+# m7: newest (Oct 22), INBOX — added by test 3 to exercise new-mail-after-backfill.
 M7 = f"""From: New Sender <new@fixture.test>
 To: someone@example.test
 Subject: Brand new mail
 Message-Id: <{M7_ID}>
-Date: Wed, 21 Oct 2026 09:30:00 +0000
+Date: Tue, 22 Oct 2026 09:30:00 +0000
 Content-Type: text/plain; charset=utf-8
 
 A brand-new message arriving after the backfill.
@@ -307,7 +343,8 @@ def main() -> int:
         )
     _git(vault, "push", "origin", "HEAD")
 
-    # Triage table: one row per manifest id received (the backfill batch is m6,m1,m2,m3).
+    # Triage table: one row per manifest id received (the newest-first backfill batch is
+    # m3,m2,m1,m9,m6,m10; m1 is the "action" message, the rest noise).
     header = "| msg-id | folder | from | class | action taken |"
     sep = "|---|---|---|---|---|"
     rows = ["## Triage", header, sep]
@@ -385,11 +422,18 @@ def _write_message(folder_rel: str, filename: str, body: str, mail_root: Path) -
 
 
 def _build_maildir(mail_root: Path) -> None:
-    """Create the six-message fixture maildir under ``mail_root/<ACCOUNT>/``."""
-    _write_message("INBOX", "m6.eml", M6, mail_root)
-    _write_message("INBOX", "m1.eml", M1, mail_root)
-    _write_message("INBOX", "m2.eml", M2, mail_root)
+    """Create the nine-message fixture maildir under ``mail_root/<ACCOUNT>/``.
+
+    INBOX holds m1/m2/m3 (recent), m9/m6/m10 (history, in-window) and m8 (pre-floor); the
+    PII folder holds m4; Sent Items holds own-mail m5.
+    """
     _write_message("INBOX", "m3.eml", M3, mail_root)
+    _write_message("INBOX", "m2.eml", M2, mail_root)
+    _write_message("INBOX", "m1.eml", M1, mail_root)
+    _write_message("INBOX", "m9.eml", M9, mail_root)
+    _write_message("INBOX", "m6.eml", M6, mail_root)
+    _write_message("INBOX", "m10.eml", M10, mail_root)
+    _write_message("INBOX", "m8.eml", M8, mail_root)
     _write_message("INBOX/FU-Admin/PhD_applications", "m4.eml", M4, mail_root)
     _write_message("Sent Items", "m5.eml", M5, mail_root)
 
@@ -634,7 +678,7 @@ def _read_processed_log(log_path: Path) -> list[dict]:
 
 
 def _manifest_ids_from_brief(brief: str) -> list[str]:
-    """Extract the message-ids from a brief's MANIFEST lines, in order (oldest-first)."""
+    """Extract the message-ids from a brief's MANIFEST lines, in order (newest-first)."""
     ids: list[str] = []
     in_manifest = False
     for line in brief.splitlines():
@@ -665,7 +709,7 @@ def _vault_head(vault: Path) -> str:
 
 # --- The four smoke tests ---------------------------------------------------- #
 def test_mail_keeper_backfill_batch_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test 1: fresh world + forced run → backfill batch of 4 (m6,m1,m2,m3 oldest-first)."""
+    """Test 1: fresh world + forced run → newest-first backfill batch of 6 (m3,m2,m1,m9,m6,m10)."""
     w = _build_world(tmp_path, monkeypatch)
 
     # Pre-run backup snapshot (independent of the workflow's internal check).
@@ -687,25 +731,28 @@ def test_mail_keeper_backfill_batch_one(tmp_path: Path, monkeypatch: pytest.Monk
     assert "event tool_use #2" in log_text
     assert "event text #3" in log_text
 
-    # The shim's captured brief: the backfill batch of 4, oldest-first, PII/own excluded.
+    # The shim's captured brief: the newest-first backfill batch of 6, PII/own/pre-floor excluded.
     brief = (w["tmp"] / "brief.txt").read_text(encoding="utf-8")
     ids = _manifest_ids_from_brief(brief)
-    assert ids == [M6_ID, M1_ID, M2_ID, M3_ID], f"unexpected manifest order: {ids}"
+    assert ids == [M3_ID, M2_ID, M1_ID, M9_ID, M6_ID, M10_ID], f"unexpected manifest order: {ids}"
     assert M4_ID not in brief, "PII message must not appear in the brief"
     assert M5_ID not in brief, "own mail must not appear in the brief"
+    assert M8_ID not in brief, "pre-floor m8 must not appear in the brief"
 
-    # Processed log: exactly 4 lines with the v1 6-field schema and expected classes.
+    # Processed log: exactly 6 lines with the v1 6-field schema and expected classes.
     records = _read_processed_log(w["processed_log"])
-    assert len(records) == 4, f"expected 4 processed-log lines, got {len(records)}"
+    assert len(records) == 6, f"expected 6 processed-log lines, got {len(records)}"
     by_id = {r["email_file"]: r for r in records}
-    assert set(by_id) == {M6_ID, M1_ID, M2_ID, M3_ID}
+    assert set(by_id) == {M3_ID, M2_ID, M1_ID, M9_ID, M6_ID, M10_ID}
     expected_keys = {"timestamp", "email_file", "subject", "from", "target_section", "processed_to"}
     for rec in records:
         assert set(rec.keys()) == expected_keys, f"bad schema: {set(rec.keys())}"
-    assert by_id[M6_ID]["target_section"] == "noise"
-    assert by_id[M1_ID]["target_section"] == "action"
-    assert by_id[M2_ID]["target_section"] == "noise"
     assert by_id[M3_ID]["target_section"] == "noise"
+    assert by_id[M2_ID]["target_section"] == "noise"
+    assert by_id[M1_ID]["target_section"] == "action"
+    assert by_id[M9_ID]["target_section"] == "noise"
+    assert by_id[M6_ID]["target_section"] == "noise"
+    assert by_id[M10_ID]["target_section"] == "noise"
 
     # Vault: provenance edits + todo line + draft.
     meetings_path = w["vault"] / "projects" / "ORBIT" / "00_Project_management" / "01_Meetings.md"
@@ -756,7 +803,7 @@ def test_mail_keeper_no_new_mail_after_backfill(
     """Test 2: continue the world → run 2 has no agent call, no new log lines, HEAD unchanged."""
     w = _build_world(tmp_path, monkeypatch)
 
-    # Run 1 (the backfill batch).
+    # Run 1 (the newest-first backfill batch of 6).
     code1 = run(
         ["run", "--force", "--config", str(w["config_path"])],
         now=datetime(2026, 10, 21, 22, 30),
@@ -766,7 +813,7 @@ def test_mail_keeper_no_new_mail_after_backfill(
     assert code1 == 0
     head_after_run1 = _vault_head(w["vault"])
     log_count_after_run1 = len(_read_processed_log(w["processed_log"]))
-    assert log_count_after_run1 == 4
+    assert log_count_after_run1 == 6
 
     # Run 2: no new mail → no agent call, no new processed-log lines, HEAD unchanged.
     t0 = time.monotonic()
@@ -821,8 +868,8 @@ def test_mail_keeper_new_mail_after_backfill(
     assert ids == [M7_ID], f"expected manifest exactly [m7], got {ids}"
 
     records = _read_processed_log(w["processed_log"])
-    # Run 1 added 4 (m6,m1,m2,m3); run 3 adds 1 (m7) → 5 total.
-    assert len(records) == 5, f"expected 5 processed-log lines, got {len(records)}"
+    # Run 1 added 6 (m3,m2,m1,m9,m6,m10); run 3 adds 1 (m7) → 7 total.
+    assert len(records) == 7, f"expected 7 processed-log lines, got {len(records)}"
     ids_in_log = [r["email_file"] for r in records]
     assert M7_ID in ids_in_log, "m7 must be recorded in the processed log"
     # Zero duplicate lines vs runs 1–2: every id appears exactly once.
@@ -832,10 +879,10 @@ def test_mail_keeper_new_mail_after_backfill(
 def test_mail_keeper_agent_failure_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test 4: fresh world with the failure shim → error run (no progress), then retry OK.
 
-    Run 1 uses ``shim_fail`` (empty state → backfill start presents 4 candidates): the agent
+    Run 1 uses ``shim_fail`` (empty state → backfill start presents 6 candidates): the agent
     fails, so the workflow reports status=error, writes NO processed log and advances NO
     cursors/state. Re-running with a config copy pointing ``agent.binary`` back at the good
-    shim re-presents the SAME 4 ids and succeeds (4 log lines, OC: commit present).
+    shim re-presents the SAME 6 ids and succeeds (6 log lines, OC: commit present).
 
     Note: per scheduler.py's documented contract ("Per-workflow errors never change the exit
     code"), run 1 exits 0 even though the workflow reports status=error; last-run.txt records
@@ -856,10 +903,11 @@ def test_mail_keeper_agent_failure_retry(tmp_path: Path, monkeypatch: pytest.Mon
     assert "WORKFLOW mail-keeper status=error" in log1
     assert "overall: error" in _last_run(w["logs"])
 
-    # The failure shim captured the brief (first act) with all 4 backfill ids.
+    # The failure shim captured the brief (first act) with all 6 backfill ids.
     brief = (w["tmp"] / "brief.txt").read_text(encoding="utf-8")
     ids = _manifest_ids_from_brief(brief)
-    assert ids == [M6_ID, M1_ID, M2_ID, M3_ID], f"failure run must present all 4 ids: {ids}"
+    expected = [M3_ID, M2_ID, M1_ID, M9_ID, M6_ID, M10_ID]
+    assert ids == expected, f"failure run must present all 6 ids: {ids}"
 
     # No processed log (the agent failed → no append).
     assert not w["processed_log"].is_file(), "no processed log on a failed agent run"
@@ -900,13 +948,14 @@ def test_mail_keeper_agent_failure_retry(tmp_path: Path, monkeypatch: pytest.Mon
     )
     assert code2 == 0
 
-    # The SAME 4 ids are re-presented and the run succeeds.
+    # The SAME 6 ids are re-presented and the run succeeds.
     brief2 = (w["tmp"] / "brief.txt").read_text(encoding="utf-8")
     ids2 = _manifest_ids_from_brief(brief2)
-    assert ids2 == [M6_ID, M1_ID, M2_ID, M3_ID], f"retry must re-present the same 4 ids: {ids2}"
+    expected2 = [M3_ID, M2_ID, M1_ID, M9_ID, M6_ID, M10_ID]
+    assert ids2 == expected2, f"retry must re-present the same 6 ids: {ids2}"
 
     records = _read_processed_log(w["processed_log"])
-    assert len(records) == 4, f"expected 4 processed-log lines after retry, got {len(records)}"
+    assert len(records) == 6, f"expected 6 processed-log lines after retry, got {len(records)}"
     log2 = _run_logs(w["logs"])[1].read_text(encoding="utf-8")
     assert "WORKFLOW mail-keeper status=ok" in log2
 

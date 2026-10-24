@@ -1,17 +1,19 @@
-"""Hermetic tests for the mail-keeper workflow module (Task 3).
+"""Hermetic tests for the mail-keeper workflow module (Task 5 — newest-first backfill).
 
 These build a throwaway maildir + ``notmuch new`` index entirely inside
 ``tmp_path_factory`` (following :mod:`tests.test_mail_reader`'s fixture pattern, account
 ``acct@example.test``) and drive :class:`~agentic_scripts.workflows.mail_keeper.MailKeeper`
 with an injected fake agent (monkeypatched ``AgentRunner.run`` — NO real ``opencode``, no
-live LLM). They never touch the live index at ``/workspace/docker/mbsync/notmuch/`` or the
-maildir at ``/workspace/docker/mbsync/backup``.
+live LLM). They never touch the live notmuch index or maildir backup tree — only the
+throwaway fixture world under ``tmp_path``.
 
-The fixture messages (controlled ``Date:`` headers, distinct ids) cover the detection
-paths: an OLD backfill message (m6), recent INBOX mail (m1 plain / m2 multipart / m3
-HTML-only), a PII-folder message (m4), and own-mail in Sent Items (m5). Tests 1–7 below map
-one-to-one to the task spec's acceptance list; test 8 is the load-bearing base-smoke
-compatibility check (run as part of the full suite, see :mod:`tests.smoke.test_smoke_base`).
+The fixture messages (controlled ``Date:`` headers, distinct ids) cover the newest-first
+two-boundary detection paths: recent INBOX mail (m1 plain / m2 multipart / m3 HTML-only),
+history mail for the multi-run backfill (m9 Sep 15, m6 Aug 15, m10 Jul 15), an OLD message
+OUTSIDE the 1-year floor (m8 Mar 2025 — never triaged), a PII-folder message (m4), and
+own-mail in Sent Items (m5). The tests below map to the Task 5 spec's acceptance list; the
+last test is the load-bearing base-smoke compatibility check (run as part of the full
+suite, see :mod:`tests.smoke.test_smoke_base`).
 """
 
 from __future__ import annotations
@@ -37,43 +39,35 @@ ACCOUNT = "acct@example.test"
 OWNER = "yuri.durodie@vub.be"
 
 # --- Fixture message ids ----------------------------------------------------- #
-M6_ID = "m6@fixture.test"  # OLD (~2 months back), INBOX — the backfill anchor
-M1_ID = "m1@fixture.test"  # recent, INBOX, plain (Coera)
-M2_ID = "m2@fixture.test"  # recent, INBOX, multipart
-M3_ID = "m3@fixture.test"  # recent, INBOX, HTML-only
-M4_ID = "m4@fixture.test"  # recent, PII folder — must be excluded
-M5_ID = "m5@fixture.test"  # recent, Sent Items, own mail — must be excluded
-M7_ID = "m7@fixture.test"  # added by the steady-state test (newest)
+M3_ID = "m3@fixture.test"  # newest INBOX (Oct 21 11:00), HTML-only
+M2_ID = "m2@fixture.test"  # INBOX (Oct 21 10:00), multipart
+M1_ID = "m1@fixture.test"  # INBOX (Oct 21 09:00), plain (Coera) — the "action" message
+M9_ID = "m9@fixture.test"  # history INBOX (Sep 15), noise
+M6_ID = "m6@fixture.test"  # history INBOX (Aug 15), noise
+M10_ID = "m10@fixture.test"  # history INBOX (Jul 15), noise — oldest in-window
+M8_ID = "m8@fixture.test"  # OLD INBOX (Mar 2025) — OUTSIDE the floor, never triaged
+M4_ID = "m4@fixture.test"  # PII folder — must be excluded
+M5_ID = "m5@fixture.test"  # Sent Items, own mail — must be excluded
+M7_ID = "m7@fixture.test"  # added by the new-mail test (Oct 22)
 
 # --- Fixture message bodies -------------------------------------------------- #
-# m6: OLD, ~2 months back (Aug 2026), INBOX. Distinct subject so it sorts first.
-M6 = f"""From: Old Sender <old@fixture.test>
+# m3: newest INBOX (Oct 21 11:00), HTML-only.
+M3 = f"""From: Html <html@fixture.test>
 To: someone@example.test
-Subject: Backfill anchor old
-Message-Id: <{M6_ID}>
-Date: Mon, 17 Aug 2026 09:00:00 +0000
-Content-Type: text/plain; charset=utf-8
+Subject: Recent html three
+Message-Id: <{M3_ID}>
+Date: Mon, 21 Oct 2026 11:00:00 +0000
+Content-Type: text/html; charset=utf-8
 
-An old message that the backfill must pick up first.
+<html><body>HTML-only marker body.</body></html>
 """
 
-# m1: recent (Oct 20), INBOX, plain from Coera.
-M1 = f"""From: Coera <coera@fixture.test>
-To: someone@example.test
-Subject: Recent plain one
-Message-Id: <{M1_ID}>
-Date: Tue, 20 Oct 2026 10:00:00 +0000
-Content-Type: text/plain; charset=utf-8
-
-A recent plain-text message.
-"""
-
-# m2: recent (Oct 20), INBOX, multipart (html + plain).
+# m2: INBOX (Oct 21 10:00), multipart (html + plain).
 M2 = f"""From: Multi <multi@fixture.test>
 To: someone@example.test
 Subject: Recent multipart two
 Message-Id: <{M2_ID}>
-Date: Tue, 20 Oct 2026 11:00:00 +0000
+Date: Mon, 21 Oct 2026 10:00:00 +0000
 MIME-Version: 1.0
 Content-Type: multipart/mixed; boundary="BOUNDARY"
 
@@ -88,18 +82,62 @@ Multipart plain marker.
 --BOUNDARY--
 """
 
-# m3: recent (Oct 20), INBOX, HTML-only.
-M3 = f"""From: Html <html@fixture.test>
+# m1: INBOX (Oct 21 09:00), plain from Coera — the "action" message.
+M1 = f"""From: Coera <coera@fixture.test>
 To: someone@example.test
-Subject: Recent html three
-Message-Id: <{M3_ID}>
-Date: Tue, 20 Oct 2026 12:00:00 +0000
-Content-Type: text/html; charset=utf-8
+Subject: Recent plain one
+Message-Id: <{M1_ID}>
+Date: Mon, 21 Oct 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
 
-<html><body>HTML-only marker body.</body></html>
+A recent plain-text message.
 """
 
-# m4: recent (Oct 20), PII folder — excluded from detection.
+# m9: history INBOX (Sep 15), noise.
+M9 = f"""From: Sep Sender <sep@fixture.test>
+To: someone@example.test
+Subject: History nine
+Message-Id: <{M9_ID}>
+Date: Mon, 15 Sep 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+A September history message.
+"""
+
+# m6: history INBOX (Aug 15), noise.
+M6 = f"""From: Aug Sender <aug@fixture.test>
+To: someone@example.test
+Subject: History six
+Message-Id: <{M6_ID}>
+Date: Mon, 17 Aug 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+An August history message.
+"""
+
+# m10: history INBOX (Jul 15), noise — the oldest in-window message.
+M10 = f"""From: Jul Sender <jul@fixture.test>
+To: someone@example.test
+Subject: History ten
+Message-Id: <{M10_ID}>
+Date: Mon, 13 Jul 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+A July history message (oldest in the window).
+"""
+
+# m8: OLD INBOX (Mar 2025) — OUTSIDE the 1-year floor, must never be triaged.
+M8 = f"""From: Old Sender <old@fixture.test>
+To: someone@example.test
+Subject: Pre-floor old mail
+Message-Id: <{M8_ID}>
+Date: Mon, 17 Mar 2025 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+An old message outside the backfill floor — never triaged.
+"""
+
+# m4: PII folder — excluded from detection.
 M4 = f"""From: PhD Applicant <phd@fixture.test>
 To: someone@example.test
 Subject: PhD application (PII)
@@ -110,7 +148,7 @@ Content-Type: text/plain; charset=utf-8
 A PII-folder message that must never enter the manifest.
 """
 
-# m5: recent (Oct 20), Sent Items, own mail — excluded (style sampling only).
+# m5: Sent Items, own mail — excluded (style sampling only).
 M5 = f"""From: Yuri Durodie <{OWNER}>
 To: coera@fixture.test
 Subject: Own sent mail (style)
@@ -130,11 +168,18 @@ def _write_message(folder_rel: str, filename: str, body: str, mail_root: Path) -
 
 
 def _build_maildir(mail_root: Path) -> None:
-    """Create the six-message maildir under ``mail_root/<ACCOUNT>/``."""
-    _write_message("INBOX", "m6.eml", M6, mail_root)
-    _write_message("INBOX", "m1.eml", M1, mail_root)
-    _write_message("INBOX", "m2.eml", M2, mail_root)
+    """Create the nine-message fixture maildir under ``mail_root/<ACCOUNT>/``.
+
+    INBOX holds m1/m2/m3 (recent), m9/m6/m10 (history, in-window) and m8 (pre-floor); the
+    PII folder holds m4; Sent Items holds own-mail m5.
+    """
     _write_message("INBOX", "m3.eml", M3, mail_root)
+    _write_message("INBOX", "m2.eml", M2, mail_root)
+    _write_message("INBOX", "m1.eml", M1, mail_root)
+    _write_message("INBOX", "m9.eml", M9, mail_root)
+    _write_message("INBOX", "m6.eml", M6, mail_root)
+    _write_message("INBOX", "m10.eml", M10, mail_root)
+    _write_message("INBOX", "m8.eml", M8, mail_root)
     _write_message("INBOX/FU-Admin/PhD_applications", "m4.eml", M4, mail_root)
     _write_message("Sent Items", "m5.eml", M5, mail_root)
 
@@ -367,15 +412,24 @@ def _run_workflow(ctx: WorkContext) -> object:
 
 
 # --------------------------------------------------------------------------- #
-# 1. First run = backfill start (fresh state, epoch-0 cursors)                #
+# 1. First run = newest-first backfill (fresh state, two-boundary cursors)     #
 # --------------------------------------------------------------------------- #
-def test_first_run_backfill_start(hermetic_mail, tmp_path, monkeypatch):
-    """Fresh state → manifest [m6,m1,m2,m3] date-ascending; PII/own excluded; agent ok."""
+def test_run_one_fresh_state_newest_first(hermetic_mail, tmp_path, monkeypatch):
+    """Fresh state → manifest [m3,m2,m1,m9,m6,m10] newest-first; m4/m5/m8 absent; v2 state."""
     log_path = _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
 
     fake = _FakeRunner(
         _ok_result(
-            _triage_table([(M6_ID, "noise"), (M1_ID, "action"), (M2_ID, "noise"), (M3_ID, "noise")])
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
         )
     )
     ctx = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake)
@@ -389,21 +443,30 @@ def test_first_run_backfill_start(hermetic_mail, tmp_path, monkeypatch):
     assert Path(call["work_dir"]) == ctx.admin_repo
     brief = call["brief"]
 
-    # Manifest is [m6, m1, m2, m3] date-ascending; PII (m4) + own (m5) excluded.
+    # Manifest is [m3, m2, m1, m9, m6, m10] newest-first; PII (m4) + own (m5) + pre-floor
+    # (m8) all excluded. notmuch's natural order is newest-first — pinned here.
     ids = _manifest_ids_from_brief(brief)
-    assert ids == [M6_ID, M1_ID, M2_ID, M3_ID]
-    assert "MANIFEST (4 message(s)):" in brief
-    assert f"{M4_ID}" not in brief
-    assert f"{M5_ID}" not in brief
+    assert ids == [M3_ID, M2_ID, M1_ID, M9_ID, M6_ID, M10_ID]
+    assert "MANIFEST (6 message(s)):" in brief
+    assert M4_ID not in brief
+    assert M5_ID not in brief
+    assert M8_ID not in brief
 
-    # Result ok with 4 items found.
+    # Result ok with 6 items found.
     assert result.status == "ok"
-    assert result.items_found == 4
+    assert result.items_found == 6
 
-    # Processed log: exactly 4 lines, 6 keys each, classes match the table.
+    # Processed log: exactly 6 lines, 6 keys each, classes match the table.
     records = _read_processed_log(log_path)
-    assert len(records) == 4
-    expected_classes = {M6_ID: "noise", M1_ID: "action", M2_ID: "noise", M3_ID: "noise"}
+    assert len(records) == 6
+    expected_classes = {
+        M3_ID: "noise",
+        M2_ID: "noise",
+        M1_ID: "action",
+        M9_ID: "noise",
+        M6_ID: "noise",
+        M10_ID: "noise",
+    }
     for rec in records:
         assert set(rec.keys()) == {
             "timestamp",
@@ -416,133 +479,281 @@ def test_first_run_backfill_start(hermetic_mail, tmp_path, monkeypatch):
         assert rec["email_file"] in expected_classes
         assert rec["target_section"] == expected_classes[rec["email_file"]]
 
-    # State: bootstrapped_at set; INBOX cursor at the fixture max ts (proves oldest-first
-    # walk + cursor max); deferred empty.
+    # State v2: floor = now−365d (±2 s); new.last_date = ts(m3) (manifest max). The back
+    # frontier is the initial floor — run 1's manifest min (ts(m1)) does not drop it below the
+    # floor, so per the spec's min/max rule it stays at the floor (last_message_id unset).
     state = json.loads((tmp_path / "state" / "mail-keeper.json").read_text(encoding="utf-8"))
     assert "bootstrapped_at" in state
-    assert state["cursors"]["INBOX"]["last_date"] == hermetic_mail["inbox_max_ts"]
+    now = int(time.time())
+    assert abs(state["backfill_floor"] - (now - 365 * 86400)) <= 2
+    inbox = state["cursors"]["INBOX"]
+    assert set(inbox.keys()) == {"new", "back"}
+    assert inbox["new"]["last_date"] == hermetic_mail["inbox_max_ts"]  # ts(m3), the newest
+    assert inbox["new"]["last_message_id"] == M3_ID
+    assert inbox["back"]["last_date"] == state["backfill_floor"]  # initial floor (not dropped)
+    assert inbox["back"]["last_date"] >= state["backfill_floor"]  # invariant: never below floor
     assert state["deferred"] == []
 
 
 # --------------------------------------------------------------------------- #
-# 2. Steady-state detection (backfill complete)                               #
+# 2. Run two = no new mail (history re-walk filtered by the processed log)     #
 # --------------------------------------------------------------------------- #
-def test_steady_state_detection(tmp_path, monkeypatch):
-    """Pre-seeded cursor at max ts + new m7 → manifest exactly [m7]; cursor advances.
+def test_run_two_no_new_mail_hist_filtered_by_log(hermetic_mail, tmp_path, monkeypatch):
+    """Run 1 then run 2: no agent call, status ok, log + state content unchanged."""
+    log_path = _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+
+    # Run 1 (fresh state → the newest-first backfill batch).
+    fake1 = _FakeRunner(
+        _ok_result(
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
+        )
+    )
+    ctx1 = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake1)
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+
+    state_path = tmp_path / "state" / "mail-keeper.json"
+    state_after_run1 = state_path.read_text(encoding="utf-8")
+    log_count_after_run1 = len(_read_processed_log(log_path))
+
+    # Run 2: no new mail. The history re-walk of m1/m2 (still in (back, new]) is filtered by
+    # the processed log → merged pool empty → NO agent call, state content identical.
+    fake2 = _FakeRunner(_ok_result("no-op"))  # must NOT be called
+    ctx2 = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake2)
+    result2 = _run_workflow(ctx2)
+
+    assert result2.status == "ok"
+    assert result2.items_found == 0
+    assert len(fake2.calls) == 0
+    assert len(_read_processed_log(log_path)) == log_count_after_run1
+    assert state_path.read_text(encoding="utf-8") == state_after_run1
+    assert any("no new mail" in a for a in result2.actions)
+
+
+# --------------------------------------------------------------------------- #
+# 3. Run three = new mail (m7) arrives during the backfill                     #
+# --------------------------------------------------------------------------- #
+def test_run_three_new_mail(tmp_path, monkeypatch):
+    """Run 1, then add m7 (Oct 22) + reindex → run 3 manifest exactly [m7]; back unchanged.
 
     Uses its own isolated corpus (not the shared module fixture) so it never mutates the
-    index that tests 1/3/4/6 rely on — this keeps the suite order-independent.
+    index that the other tests rely on — this keeps the suite order-independent.
     """
-    base = tmp_path / "steady"
+    base = tmp_path / "run3"
     mail_root = base / "mail"
     index_path = base / "index"
     work_dir = base / "work"
 
-    # Corpus: one old INBOX message (m1) + one Sent Items own-mail message (m5).
-    _write_message("INBOX", "m1.eml", M1, mail_root)
-    _write_message("Sent Items", "m5.eml", M5, mail_root)
+    # Corpus: the full INBOX set (m1/m2/m3 recent + m9/m6/m10 history) + PII m4 + own m5.
+    _build_maildir(mail_root)
     _build_index(index_path, mail_root, work_dir)
 
-    old_max = _inbox_max_ts(index_path, mail_root, work_dir)  # m1's ts (the only INBOX msg)
-
-    # Add m7 (newer than m1) to INBOX/cur and re-index.
-    M7_ID_LOCAL = "m7@fixture.test"
-    m7_body = f"""From: New Sender <new@fixture.test>
-To: someone@example.test
-Subject: Steady state new mail
-Message-Id: <{M7_ID_LOCAL}>
-Date: Wed, 21 Oct 2026 09:00:00 +0000
-Content-Type: text/plain; charset=utf-8
-
-A brand-new message added after the backfill.
-"""
-    _write_message("INBOX", "m7.eml", m7_body, mail_root)
-    _build_index(index_path, mail_root, tmp_path / "reindex")
-
-    # Point the env at this isolated corpus.
     monkeypatch.setenv("MAIL_INDEX_DB", str(index_path))
     monkeypatch.setenv("MAIL_MAIL_ROOT", str(mail_root))
     monkeypatch.setenv("MAIL_OWNER_ADDRESS", OWNER)
     log_path = tmp_path / "processed-log.jsonl"
     monkeypatch.setenv("MAIL_PROCESSED_LOG", str(log_path))
 
-    # Pre-seed the cursor at m1's ts (the old max) so only m7 is newer.
-    state_dir = tmp_path / "state"
-    StateStore(state_dir).save(
-        "mail-keeper",
-        {"cursors": {"INBOX": {"last_date": old_max, "last_message_id": M1_ID}}},
+    # Run 1 (fresh state → the newest-first backfill batch).
+    fake1 = _FakeRunner(
+        _ok_result(
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
+        )
     )
-
-    fake = _FakeRunner(_ok_result(_triage_table([(M7_ID_LOCAL, "info")])))
-    ctx = _make_ctx(
+    ctx1 = _make_ctx(
         tmp_path,
         {"mail_root": mail_root, "index_path": index_path},
         admin_repo=tmp_path / "admin",
-        fake_runner=fake,
-        state_dir=state_dir,
+        fake_runner=fake1,
     )
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
 
-    result = _run_workflow(ctx)
-    assert result.status == "ok"
+    state_path = tmp_path / "state" / "mail-keeper.json"
+    back_after_run1 = json.loads(state_path.read_text(encoding="utf-8"))["cursors"]["INBOX"][
+        "back"
+    ]["last_date"]
 
-    assert len(fake.calls) == 1
-    brief = fake.calls[0]["brief"]
-    ids = _manifest_ids_from_brief(brief)
-    assert ids == [M7_ID_LOCAL]
-    assert _manifest_line_count(brief) == 1
+    # Add m7 (newer than everything) to INBOX/cur and re-index.
+    m7_body = f"""From: New Sender <new@fixture.test>
+To: someone@example.test
+Subject: New mail during backfill
+Message-Id: <{M7_ID}>
+Date: Tue, 22 Oct 2026 12:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+A brand-new message arriving while the backfill is in flight.
+"""
+    _write_message("INBOX", "m7.eml", m7_body, mail_root)
+    _build_index(index_path, mail_root, tmp_path / "reindex")
+
+    # Run 3: manifest exactly [m7] (new mail only); back frontier unchanged.
+    fake3 = _FakeRunner(_ok_result(_triage_table([(M7_ID, "info")])))
+    ctx3 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake3,
+    )
+    result3 = _run_workflow(ctx3)
+    assert result3.status == "ok"
+
+    brief3 = fake3.calls[0]["brief"]
+    ids3 = _manifest_ids_from_brief(brief3)
+    assert ids3 == [M7_ID]
+    assert _manifest_line_count(brief3) == 1
 
     # Processed log +1 line with the table's class.
     records = _read_processed_log(log_path)
-    assert len(records) == 1
-    assert records[0]["email_file"] == M7_ID_LOCAL
-    assert records[0]["target_section"] == "info"
+    assert len(records) == 7
+    assert records[-1]["email_file"] == M7_ID
+    assert records[-1]["target_section"] == "info"
 
-    # Cursor advanced to m7's ts (the new max, > the old max).
-    state = json.loads((state_dir / "mail-keeper.json").read_text(encoding="utf-8"))
-    assert state["cursors"]["INBOX"]["last_date"] > old_max
-    assert state["cursors"]["INBOX"]["last_message_id"] == M7_ID_LOCAL
+    # new.last_date advanced to ts(m7); back.last_date unchanged (still ts(m10)).
+    state3 = json.loads(state_path.read_text(encoding="utf-8"))
+    inbox3 = state3["cursors"]["INBOX"]
+    assert inbox3["new"]["last_message_id"] == M7_ID
+    assert inbox3["new"]["last_date"] > back_after_run1
+    assert inbox3["back"]["last_date"] == back_after_run1
 
 
 # --------------------------------------------------------------------------- #
-# 3. No new mail                                                              #
+# 4. New mail is never starved during the backfill (MAX_BATCH monkeypatched)   #
 # --------------------------------------------------------------------------- #
-def test_no_new_mail(hermetic_mail, tmp_path, monkeypatch):
-    """Cursor at the max ts → ok, items_found 0, no agent call, no log line."""
-    log_path = _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+def test_new_mail_not_starved_during_backfill(tmp_path, monkeypatch):
+    """FRESH world, MAX_BATCH=3: run 1 [m3,m2,m1] (deferred m9,m6,m10); run 2 [n1,m9,m6].
 
-    state_dir = tmp_path / "state"
-    StateStore(state_dir).save(
-        "mail-keeper",
-        {
-            "cursors": {
-                "INBOX": {"last_date": hermetic_mail["inbox_max_ts"], "last_message_id": M3_ID}
-            }
-        },
+    The load-bearing no-starvation test: with 3 deferred history messages waiting, a new
+    message n1 (Oct 22) must still land FIRST in run 2's batch. Uses its own isolated corpus
+    (not the shared module fixture) so it never mutates the index the other tests rely on.
+    """
+    base = tmp_path / "nostarve"
+    mail_root = base / "mail"
+    index_path = base / "index"
+    work_dir = base / "work"
+
+    _build_maildir(mail_root)
+    _build_index(index_path, mail_root, work_dir)
+
+    monkeypatch.setenv("MAIL_INDEX_DB", str(index_path))
+    monkeypatch.setenv("MAIL_MAIL_ROOT", str(mail_root))
+    monkeypatch.setenv("MAIL_OWNER_ADDRESS", OWNER)
+    log_path = tmp_path / "processed-log.jsonl"
+    monkeypatch.setenv("MAIL_PROCESSED_LOG", str(log_path))
+    monkeypatch.setattr(mail_keeper, "MAX_BATCH", 3)
+
+    # Run 1 (fresh state): manifest [m3,m2,m1]; deferred = kept overflow [m9,m6,m10].
+    fake1 = _FakeRunner(
+        _ok_result(_triage_table([(M3_ID, "noise"), (M2_ID, "noise"), (M1_ID, "action")]))
     )
-
-    fake = _FakeRunner(_ok_result("no-op"))  # must NOT be called
-    ctx = _make_ctx(
+    ctx1 = _make_ctx(
         tmp_path,
-        hermetic_mail,
+        {"mail_root": mail_root, "index_path": index_path},
         admin_repo=tmp_path / "admin",
-        fake_runner=fake,
-        state_dir=state_dir,
+        fake_runner=fake1,
     )
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
 
-    result = _run_workflow(ctx)  # noqa: F841 - run for side effects; asserted via fake.calls/log
+    brief1 = fake1.calls[0]["brief"]
+    ids1 = _manifest_ids_from_brief(brief1)
+    assert ids1 == [M3_ID, M2_ID, M1_ID]
+    state_path = tmp_path / "state" / "mail-keeper.json"
+    state1 = json.loads(state_path.read_text(encoding="utf-8"))
+    deferred_ids1 = [d["message_id"] for d in state1["deferred"]]
+    assert deferred_ids1 == [M9_ID, M6_ID, M10_ID]  # kept overflow, newest-first
 
-    assert result.status == "ok"
-    assert result.items_found == 0
-    assert len(fake.calls) == 0
-    assert not log_path.exists()
-    assert any("no new mail" in a for a in result.actions)
+    # Add n1 (Oct 22 09:00 — newer than m3) to INBOX/cur and re-index.
+    N1_ID = "n1@fixture.test"
+    n1_body = f"""From: New Sender <new@fixture.test>
+To: someone@example.test
+Subject: New mail while backfill in flight
+Message-Id: <{N1_ID}>
+Date: Tue, 22 Oct 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+A new message that must not be starved by the pending backfill.
+"""
+    _write_message("INBOX", "n1.eml", n1_body, mail_root)
+    _build_index(index_path, mail_root, tmp_path / "reindex")
+
+    # Run 2: manifest [n1, m9, m6, m10] — n1 FIRST even with 3 deferred history messages
+    # waiting (no starvation). The pool is new[n1] + deferred[m9,m6,m10] = 4 entries; the cap
+    # takes the first 3 as the manifest and defers the 4th (m10) again.
+    fake2 = _FakeRunner(
+        _ok_result(_triage_table([(N1_ID, "info"), (M9_ID, "noise"), (M6_ID, "noise")]))
+    )
+    ctx2 = _make_ctx(
+        tmp_path,
+        {"mail_root": mail_root, "index_path": index_path},
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake2,
+    )
+    result2 = _run_workflow(ctx2)
+    assert result2.status == "ok"
+
+    brief2 = fake2.calls[0]["brief"]
+    ids2 = _manifest_ids_from_brief(brief2)
+    assert ids2[:1] == [N1_ID], f"n1 must be first (no starvation): {ids2}"
+    assert ids2[:3] == [N1_ID, M9_ID, M6_ID], f"expected [n1,m9,m6] prefix: {ids2}"
+
+    state2 = json.loads(state_path.read_text(encoding="utf-8"))
+    inbox2 = state2["cursors"]["INBOX"]
+    assert inbox2["new"]["last_message_id"] == N1_ID  # new.last_date = ts(n1)
+    deferred_ids2 = [d["message_id"] for d in state2["deferred"]]
+    assert deferred_ids2 == [M10_ID]  # m10 is the only remaining overflow
 
 
 # --------------------------------------------------------------------------- #
-# 4. Agent error path                                                         #
+# 5. The floor excludes old mail (m8 never presented)                          #
 # --------------------------------------------------------------------------- #
-def test_agent_error_path(hermetic_mail, tmp_path, monkeypatch):
-    """Fresh state + agent error → status error; NO cursor advance; log NOT created."""
+def test_floor_excludes_old_mail(hermetic_mail, tmp_path, monkeypatch):
+    """The pre-floor message m8 (Mar 2025) is absent from every brief across runs 1–4."""
+    _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+
+    # Run 1: fresh state → the newest-first backfill batch (m8 must be absent).
+    fake1 = _FakeRunner(_ok_result("run 1 (no table)"))
+    ctx1 = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake1)
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+    brief1 = fake1.calls[0]["brief"]
+    assert M8_ID not in brief1, "pre-floor m8 must never be presented"
+
+    # Runs 2–4: no new mail (m8 stays excluded by the floor on every re-walk).
+    for i in range(2, 5):
+        fake = _FakeRunner(_ok_result("no-op"))  # must NOT be called
+        ctx = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake)
+        result = _run_workflow(ctx)
+        assert result.status == "ok"
+        assert len(fake.calls) == 0
+    # m8 is never in the processed log either.
+    records = _read_processed_log(tmp_path / "processed-log.jsonl")
+    assert M8_ID not in {r["email_file"] for r in records}
+
+
+# --------------------------------------------------------------------------- #
+# 6. Agent failure → retry (no progress on failure; same ids re-presented)    #
+# --------------------------------------------------------------------------- #
+def test_agent_failure_retry(hermetic_mail, tmp_path, monkeypatch):
+    """Fresh state + agent error → status error, NO state file, log absent; retry re-presents."""
     _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
 
     fake = _FakeRunner(_error_result())
@@ -552,94 +763,72 @@ def test_agent_error_path(hermetic_mail, tmp_path, monkeypatch):
 
     assert result.status == "error"
     assert any("agent run error" in e for e in result.errors)
-    # NO state file with advanced cursors (fresh re-detection next run is identical).
+    # NO state file (the workflow writes no state on agent failure → fresh re-detection).
     assert not (tmp_path / "state" / "mail-keeper.json").exists()
     # Processed log NOT created.
     assert not (tmp_path / "processed-log.jsonl").exists()
 
-    # Next run re-presents the same 4 ids (brief contains them again).
+    # Retry with a good shim re-presents the SAME ids (the newest-first backfill batch).
     fake2 = _FakeRunner(
         _ok_result(
-            _triage_table([(M6_ID, "noise"), (M1_ID, "action"), (M2_ID, "noise"), (M3_ID, "noise")])
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
         )
     )
     ctx2 = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake2)
     result2 = _run_workflow(ctx2)
     assert len(fake2.calls) == 1
     ids = _manifest_ids_from_brief(fake2.calls[0]["brief"])
-    assert ids == [M6_ID, M1_ID, M2_ID, M3_ID]
+    assert ids == [M3_ID, M2_ID, M1_ID, M9_ID, M6_ID, M10_ID]
     assert result2.status == "ok"
 
 
 # --------------------------------------------------------------------------- #
-# 5. Batch cap + deferred                                                     #
+# 7. v1 schema guard (no auto-migration)                                      #
 # --------------------------------------------------------------------------- #
-def test_batch_cap_and_deferred(hermetic_mail, tmp_path, monkeypatch):
-    """15 messages → run 1 manifest a1..a10 (deferred a11..a15); run 2 a11..a15."""
+def test_v1_schema_guard(hermetic_mail, tmp_path, monkeypatch):
+    """A v1-shaped state (folder cursor without new/back) → status error, no migration."""
     _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
 
-    # Build a fresh 15-message corpus in its own maildir + index (a1..a15, increasing ts).
-    base = tmp_path / "cap"
-    mail_root = base / "mail"
-    index_path = base / "index"
-    work_dir = base / "work"
-    for i in range(1, 16):
-        day = (i + 1) % 28 or 28  # keep within a month; distinct increasing dates
-        body = f"""From: Sender {i} <sender{i}@fixture.test>
-To: someone@example.test
-Subject: Cap message {i}
-Message-Id: <a{i}@fixture.test>
-Date: Mon, {day:02d} Oct 2026 10:{i:02d}:00 +0000
-Content-Type: text/plain; charset=utf-8
+    # Pre-write a v1-shaped state: a flat {last_date, last_message_id} cursor entry.
+    state_dir = tmp_path / "state"
+    StateStore(state_dir).save(
+        "mail-keeper",
+        {
+            "bootstrapped_at": "2026-10-21T22:30:00+00:00",
+            "cursors": {"INBOX": {"last_date": 1, "last_message_id": M1_ID}},
+            "deferred": [],
+        },
+    )
 
-Cap test message number {i}.
-"""
-        _write_message("INBOX", f"a{i}.eml", body, mail_root)
-    # A Sent Items own-mail message so the canary spot-check resolves (keeps status ok).
-    _write_message("Sent Items", "s1.eml", M5, mail_root)
-    _build_index(index_path, mail_root, work_dir)
+    fake = _FakeRunner(_ok_result("must-not-run"))  # must NOT be called
+    ctx = _make_ctx(
+        tmp_path,
+        hermetic_mail,
+        admin_repo=tmp_path / "admin",
+        fake_runner=fake,
+        state_dir=state_dir,
+    )
 
-    hermetic_cap = {**hermetic_mail, "mail_root": mail_root, "index_path": index_path}
-    # Point the env at the cap corpus (override the shared hermetic paths).
-    monkeypatch.setenv("MAIL_INDEX_DB", str(index_path))
-    monkeypatch.setenv("MAIL_MAIL_ROOT", str(mail_root))
+    result = _run_workflow(ctx)
 
-    # Run 1: manifest a1..a10, deferred a11..a15.
-    fake1 = _FakeRunner(_ok_result("cap run 1 (no table)"))
-    ctx1 = _make_ctx(tmp_path, hermetic_cap, admin_repo=tmp_path / "admin", fake_runner=fake1)
-    result1 = _run_workflow(ctx1)
-    assert result1.status == "ok"
-    brief1 = fake1.calls[0]["brief"]
-    ids1 = _manifest_ids_from_brief(brief1)
-    assert len(ids1) == 10
-    assert ids1 == [f"a{i}@fixture.test" for i in range(1, 11)]
-    assert _manifest_line_count(brief1) == 10
-
-    state = json.loads((tmp_path / "state" / "mail-keeper.json").read_text(encoding="utf-8"))
-    deferred_ids = [d["message_id"] for d in state["deferred"]]
-    assert deferred_ids == [f"a{i}@fixture.test" for i in range(11, 16)]
-    # Cursor at a10's ts (the batch max).
-    a10_ts = int(state["cursors"]["INBOX"]["last_date"])
-    assert a10_ts > 0
-
-    # Run 2: manifest exactly a11..a15 (de-duped against fresh detection), deferred [].
-    fake2 = _FakeRunner(_ok_result("cap run 2 (no table)"))
-    ctx2 = _make_ctx(tmp_path, hermetic_cap, admin_repo=tmp_path / "admin", fake_runner=fake2)
-    result2 = _run_workflow(ctx2)
-    assert result2.status == "ok"
-    brief2 = fake2.calls[0]["brief"]
-    ids2 = _manifest_ids_from_brief(brief2)
-    assert ids2 == [f"a{i}@fixture.test" for i in range(11, 16)]
-    assert _manifest_line_count(brief2) == 5
-    # No id appears in both run 1 and run 2 briefs.
-    assert not (set(ids1) & set(ids2))
-
-    state2 = json.loads((tmp_path / "state" / "mail-keeper.json").read_text(encoding="utf-8"))
-    assert state2["deferred"] == []
+    assert result.status == "error"
+    assert any("state schema mismatch" in e for e in result.errors)
+    assert any("delete state/mail-keeper.json" in e for e in result.errors)
+    # No auto-migration: the agent was never invoked.
+    assert len(fake.calls) == 0
 
 
 # --------------------------------------------------------------------------- #
-# 6. Backup integrity trip                                                    #
+# 8. Backup integrity trip                                                    #
 # --------------------------------------------------------------------------- #
 def test_backup_integrity_trip(hermetic_mail, tmp_path, monkeypatch):
     """Mutated post-snapshot → status error with a guardrail message (agent was ok)."""
@@ -664,7 +853,16 @@ def test_backup_integrity_trip(hermetic_mail, tmp_path, monkeypatch):
 
     fake = _FakeRunner(
         _ok_result(
-            _triage_table([(M6_ID, "noise"), (M1_ID, "action"), (M2_ID, "noise"), (M3_ID, "noise")])
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
         )
     )
     ctx = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake)
@@ -676,7 +874,7 @@ def test_backup_integrity_trip(hermetic_mail, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 7. Index missing                                                            #
+# 9. Index missing                                                            #
 # --------------------------------------------------------------------------- #
 def test_index_missing(hermetic_mail, tmp_path, monkeypatch):
     """MAIL_INDEX_DB → nonexistent path → skipped; no state; agent + canary not run."""
@@ -708,7 +906,7 @@ def test_index_missing(hermetic_mail, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 8. Base-smoke compatibility (load-bearing)                                  #
+# 10. Base-smoke compatibility (load-bearing)                                 #
 # --------------------------------------------------------------------------- #
 def test_base_smoke_compatibility():
     """The ACTUAL base smoke suite passes with mail-keeper enabled + env isolation in place.

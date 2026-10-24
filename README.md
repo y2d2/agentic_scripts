@@ -141,12 +141,19 @@ verifies the mail backup tree is byte-identical before and after. The agent perf
 provenance-tagged vault fills, local drafts (never sent), and its own `OC:` commit + push to
 the vault's current branch.
 
-On **first runs** the per-folder cursors are epoch 0, so the workflow starts the user-confirmed
-**history backfill**: the whole index is triaged oldest-first in batches of `MAX_BATCH = 10`
-per run until the cursors reach the present (≈1,000 runs expected for the live history). An
-operator can chain `--force` runs to accelerate; per-folder cursors + the processed log make
-each run idempotent, and the agent's dedup rule (grep msg-id before every write) makes
-re-delivery after a failed run safe.
+On **first runs** the workflow starts the user-confirmed **history backfill**, processing
+history **newest-first**: the first run triages the 10 NEWEST messages of the past year, and
+every later run fills its `MAX_BATCH = 10` batch with new mail first, then history
+newest-first. A fixed **1-year floor** (captured at first run as `first-run-now − 365 d`) is
+stored in state; mail older than the floor is never triaged. Each folder's backfill completes
+when its frontier reaches the floor — after that it runs in steady state (new-mail-only, fast).
+Measured against the live index (13,160 messages; 2025: 2,813 / 2026: 2,980, read-only counts
+taken 2026-10-23), the in-window history is ≈3,500 messages ≈ ~350 runs. Pace options: the
+overnight quiet-window schedule (≈8–10 runs/night) completes in ≈10–12 weeks, or chained
+`--force` runs (≈10/hour) in ≈2 weeks. Newly arriving mail is **never starved** while the
+backfill is in flight. Per-folder cursors + the processed log make each run idempotent, and
+the agent's dedup rule (grep msg-id before every write) makes re-delivery after a failed run
+safe.
 
 ### Environment variables
 
@@ -165,10 +172,11 @@ Env wins over the defaults; the workflow reads them at run time. The `mail-searc
 1. **Precheck** — `admin_repo` + index must be readable (else `skipped`).
 2. **Canary** — disk-vs-index freshness with a 100-message tolerance; on staleness it
    *reports and defers* (never loses mail), continuing the run.
-3. **Detection** — per-folder thread search, oldest-first walk, excluding the PII folder,
-   own-mail, and already-processed ids; first runs carry epoch-0 cursors (the backfill).
-4. **Manifest** — ≤10 messages, date-ascending; over-cap entries are deferred (re-injected
-   next run, never starved).
+3. **Detection** — per-folder thread search, newest-first walk (notmuch's natural order),
+   excluding the PII folder, own-mail, and already-processed ids; a two-boundary cursor
+   (`new`/`back`) plus the 1-year floor drive the backfill.
+4. **Manifest** — ≤10 messages in merge order (new mail first, then deferred, then history
+   newest-first); over-cap entries are deferred (re-injected next run, never starved).
 5. **Agent** — one batched `mail-keeper` invocation with the manifest + skill pointer.
 6. **On `ok`** — triage-class parse, processed-log append, cursor advance, deferred clear,
    and a before/after backup byte-identity guardrail check.
@@ -188,7 +196,7 @@ for manual/accelerated backfill.
 - Vault: on its current branch (`feature/test` in the fixture world; the operator's branch
   in production). `mail/drafts/` is gitignored (local drafts, never sent).
 - Processed log: `MAIL_PROCESSED_LOG` (default `/workspace/Obsidian/config/email-processing-log.jsonl`).
-- State: `state/mail-keeper.json` (`{bootstrapped_at, cursors, deferred}`).
+- State: `state/mail-keeper.json` (v2 schema: `{bootstrapped_at, backfill_floor, cursors (two-boundary new/back per folder), deferred}`).
 
 ### Guardrails
 
