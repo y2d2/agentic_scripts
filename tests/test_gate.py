@@ -62,7 +62,10 @@ def test_in_window_high_load_closes_and_clears(tmp_path: Path, base_config: Conf
     store.update("scheduler", "gate_last_ok", "2026-10-20T22:00:00+00:00")
 
     now = datetime(2026, 10, 20, 23, 0)  # local 23:00 — inside the window
-    result = evaluate_gate(now, (2.0, 2.0, 2.0), base_config.machine, store)
+    # load1 must be >= the shipped threshold to count as "high load" (Task 5g raised it to 32.0);
+    # use a value above it so the gate closes on the load reason regardless of the exact threshold.
+    high_load = base_config.machine.load_threshold + 1.0
+    result = evaluate_gate(now, (high_load, high_load, high_load), base_config.machine, store)
 
     assert result.open is False
     assert "load" in result.reason

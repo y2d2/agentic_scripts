@@ -3,7 +3,7 @@ machine:
   quiet_window:
     start: "22:00"   # local time, HH:MM; window crosses midnight (start > end)
     end: "08:00"
-  load_threshold: 2.0          # load1 must be STRICTLY below this
+  load_threshold: 32.0         # load1 must be STRICTLY below this (88-core box; ~36% of cores — user's explicit overnight-grind choice)
   poll_interval_minutes: 30    # nominal timer cadence
   gate_polls_required: 2       # consecutive idle polls needed to open the gate; allowed: 1 or 2
   gate_poll_tolerance_minutes: 10  # max gap between consecutive idle polls
