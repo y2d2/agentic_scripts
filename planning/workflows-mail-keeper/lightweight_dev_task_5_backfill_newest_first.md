@@ -398,3 +398,45 @@ dupe, new mail (advanced frontier) never starved, ≤ MAX_BATCH/run, floor.
 
 - Exactly `src/agentic_scripts/workflows/mail_keeper.py` + `tests/test_mail_keeper.py` + this result file;
   `OC:`-prefixed; pushed to `plan/agentic-workflows` (commit hash recorded by the orchestrator's push).
+
+---
+
+# Task 5g — Raise load gate threshold to 32 (88-core box, overnight grind)
+
+## Context (last-night gate log evidence)
+
+User decision **2026-10-25**: on this **88-core** box, last night's in-window cron polls were all
+**blocked by the `load1 < 2.0` gate** — observed load1 was **2.4–9.4 = 3–11% of capacity**, yet every poll
+was rejected because 2.0 is far below what an 88-core box idles at. The overnight backfill grind therefore
+never started. Raised `machine.load_threshold` from `2.0` to **`32.0`** (≈ 36% of cores) — the user's
+explicit, aggressive choice: the grind proceeds even under heavy other workloads.
+
+## Change
+
+- **`config/workflows.yaml`:** `load_threshold: 2.0` → `load_threshold: 32.0`. Kept the comment style; the
+  trailing comment now notes "88-core box; ~36% of cores — user's explicit overnight-grind choice".
+
+## Test-grep findings (step 2)
+
+- Grep for `load_threshold` / load1 gate assumptions across `tests/` + `src/`:
+  - **`tests/test_gate.py::test_in_window_high_load_closes_and_clears`** — the ONE genuine dependency. It uses
+    the `base_config` fixture (which reads the **shipped** config) and passed `load1 = 2.0` expecting "high load"
+    (gate closed). With threshold now 32.0, load1=2.0 is *below* it → gate opens → assertion failed. **Updated
+    additively:** the test now uses `load1 = base_config.machine.load_threshold + 1.0` (strictly above the shipped
+    threshold), so it stays robust to the value and still exercises the "high load → closed" path.
+  - `tests/test_gate.py::_machine` (default `threshold=2.0`) — a standalone `Machine` builder for parametrized
+    gate tests, not an assumption of the shipped value; left as-is (its tests pass their own thresholds).
+  - `tests/test_agent.py:87` (`load_threshold=2.0`) — a fixture building its own `Machine` directly (arbitrary
+    param, does not read the shipped config); no change needed.
+  - `tests/test_config.py` — only tests validation (negative threshold raises); no assertion on the shipped value.
+  - `tests/test_scheduler.py`, `tests/smoke/*` — no `load_threshold` references.
+
+## Build / test
+
+- `uv run pytest -q` → **111 passed** (no ignores).
+- `uv run ruff check .` clean.
+
+## Commit
+
+- Exactly `config/workflows.yaml` + `tests/test_gate.py`; `OC: Raise load gate threshold to 32 (88-core box —
+  overnight grind)`; pushed `523befc..b5fc5e7` to `plan/agentic-workflows`.
