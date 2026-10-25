@@ -440,3 +440,58 @@ explicit, aggressive choice: the grind proceeds even under heavy other workloads
 
 - Exactly `config/workflows.yaml` + `tests/test_gate.py`; `OC: Raise load gate threshold to 32 (88-core box —
   overnight grind)`; pushed `523befc..b5fc5e7` to `plan/agentic-workflows`.
+
+---
+
+# Task 5h — Step-exhaustion sentinel (Run-A incident, 2026-10-25)
+
+## Incident summary
+
+Chain **Run A** (2026-10-25 08:40 UTC, `--force`) reported `status=ok` and advanced state + processed
+log (40→50) — but the agent's final message was opencode's **step-exhaustion boilerplate** ("CRITICAL -
+MAXIMUM STEPS REACHED …"), not a triage report: the agent hit the `steps: 40` frontmatter cap (41 tool
+calls, 19 min, mid-triage) and opencode still **exited 0**. No vault writes were made (verified: vault HEAD
+unchanged). **Consequence:** 10 messages (log records stamped `2026-10-25T08:59:25.458831+00:00`, all ts ≥
+2026-10-19 15:04) were marked processed without completed triage.
+
+## Recovery (already performed by the orchestrator — documented, not code)
+
+- Removed exactly those 10 records from `/workspace/Obsidian/config/email-processing-log.jsonl` (backup:
+  `/tmp/processed-log-backup-20261025.jsonl`); log back at 40 records.
+- Reset `state/mail-keeper.json` INBOX `back` to the floor (it had advanced to 2026-10-19 15:04:38 = the
+  batch's oldest entry, which would have orphaned that entry from re-collection); `new` and the 12-entry
+  deferred list untouched (backup: `/tmp/state-backup-20261025.json`).
+- Net effect: the next run re-presents exactly the failed batch (global recency: those 10 are the newest
+  unprocessed).
+
+## Fix (in `src/agentic_scripts/workflows/mail_keeper.py`)
+
+1. **New module-level helper `_is_step_exhausted(final_text)`** — True when the text contains
+   (case-insensitive) `maximum steps reached` OR `maximum number of steps allowed` (the two stable fragments
+   of opencode's step-cap boilerplate); None/empty → False. Docstring explains the opencode exit-0-on-step-cap
+   behavior that makes this sentinel necessary (the CLI cannot distinguish a step-exhausted run from real
+   success by exit code).
+2. **In `MailKeeper._run`**, immediately after the existing `agent.status in {"error","timeout"}` block and
+   BEFORE `_parse_triage_classes`: `status == "ok"` + exhausted final text → `errors.append(...)` + return
+   `WorkflowResult(status="error", ...)`. The existing error path already writes no state/log, so placement
+   needs no other change — the batch is re-presented next run.
+3. **Docstring:** the `run`/`_run` Returns sentence now includes "agent step-cap exhaustion (sentinel on the
+   final message)" as an error condition.
+
+## Tests (`tests/test_mail_keeper.py`)
+
+- **`test_agent_step_exhausted_is_error`** — fresh state + fake agent ok with the real boilerplate fragment →
+  `status == "error"`, the error mentions the step cap, NO state file written, processed log NOT created.
+- **`test_is_step_exhausted_unit`** — parameterized: boilerplate → True; the second fragment → True;
+  case-insensitive → True; a normal triage report → False; None → False; empty → False.
+
+## Build / test
+
+- `uv run pytest -q` → **113 passed** (no ignores) — up from 111 (the two new tests). The existing
+  `test_agent_failure_retry` still passes unchanged.
+- `uv run ruff check .` clean; `uv run ruff format --check .` clean for the two code files.
+
+## Commit
+
+- Exactly `src/agentic_scripts/workflows/mail_keeper.py` + `tests/test_mail_keeper.py` + this result file;
+  `OC:`-prefixed; pushed to `plan/agentic-workflows` (commit hash recorded by the orchestrator's push).

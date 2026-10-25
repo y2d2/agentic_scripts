@@ -1154,6 +1154,58 @@ def test_agent_failure_retry(hermetic_mail, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 6b. Agent step-cap exhaustion → error (Task 5h — Run-A incident)            #
+# --------------------------------------------------------------------------- #
+STEP_EXHAUSTED_BOILERPLATE = (
+    "CRITICAL - MAXIMUM STEPS REACHED: You have reached the maximum number of steps allowed "
+    "for this task. Your current progress has been saved. Please continue in a new session."
+)
+
+
+def test_agent_step_exhausted_is_error(hermetic_mail, tmp_path, monkeypatch):
+    """Fresh state + agent ok with step-exhaustion boilerplate → status error; no log/state written.
+
+    Run-A incident (2026-10-25): opencode exited 0 when the agent hit its frontmatter step cap,
+    with the step-exhaustion boilerplate as the "final message" — the workflow recorded that as
+    success (processed log + cursors advanced for incomplete triage). The sentinel now treats a
+    step-exhausted "ok" as a failure: no log append, no state write, batch re-presented next run.
+    """
+    _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+    log_path = tmp_path / "processed-log.jsonl"
+
+    fake = _FakeRunner(_ok_result(STEP_EXHAUSTED_BOILERPLATE))
+    ctx = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake)
+
+    result = _run_workflow(ctx)
+
+    assert result.status == "error"
+    assert any("step cap" in e for e in result.errors), (
+        f"error must mention the step cap: {result.errors}"
+    )
+    # NO state file (the error path writes no state → fresh re-detection next run).
+    assert not (tmp_path / "state" / "mail-keeper.json").exists()
+    # Processed log NOT created / UNCHANGED (byte-identical to the pre-run absence).
+    assert not log_path.exists(), "step-exhausted run must not append to the processed log"
+
+
+def test_is_step_exhausted_unit():
+    """_is_step_exhausted: boilerplate → True; normal report / None / empty → False."""
+    assert mail_keeper._is_step_exhausted(STEP_EXHAUSTED_BOILERPLATE) is True
+    # The second stable fragment (opencode's longer phrasing).
+    assert mail_keeper._is_step_exhausted("... maximum number of steps allowed ...") is True
+    # Case-insensitive.
+    assert mail_keeper._is_step_exhausted("maximum Steps Reached") is True
+    # A normal triage report → False (no step-cap fragment).
+    normal = (
+        "# mail-keeper Output\n\n## Triage\n| msg-id | folder | from | class | action taken |\n"
+    )
+    assert mail_keeper._is_step_exhausted(normal) is False
+    # None / empty → False.
+    assert mail_keeper._is_step_exhausted(None) is False
+    assert mail_keeper._is_step_exhausted("") is False
+
+
+# --------------------------------------------------------------------------- #
 # 7. v1 schema guard (no auto-migration)                                      #
 # --------------------------------------------------------------------------- #
 def test_v1_schema_guard(hermetic_mail, tmp_path, monkeypatch):

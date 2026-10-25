@@ -361,6 +361,32 @@ def _parse_triage_classes(final_text: str | None) -> dict[str, str] | None:
     return classes or None
 
 
+def _is_step_exhausted(final_text: str | None) -> bool:
+    """Return True when the agent's final message is opencode's step-cap boilerplate.
+
+    Purpose:
+        Detect that the agent hit its frontmatter ``steps`` cap mid-triage. When this happens,
+        opencode still **exits 0** and uses the step-exhaustion boilerplate as the "final
+        message" — so the CLI cannot distinguish a step-exhausted run from a real success by
+        exit code alone. Without this sentinel the workflow would record the run ``ok`` (append
+        to the processed log + advance cursors) for triage that never completed (the Run-A
+        incident, 2026-10-25). The caller treats a step-exhausted "ok" as a failure: no log
+        append, no cursor advance, and the batch is re-presented next run.
+
+    Args:
+        final_text: The agent's final message (its result report), or None.
+
+    Returns:
+        True when ``final_text`` contains (case-insensitive) one of the two stable fragments of
+        opencode's step-cap boilerplate — ``maximum steps reached`` or ``maximum number of steps
+        allowed``; False for None/empty or a normal report.
+    """
+    if not final_text:
+        return False
+    lowered = final_text.lower()
+    return "maximum steps reached" in lowered or "maximum number of steps allowed" in lowered
+
+
 def _load_processed_log_ids(log_path: Path) -> set[str]:
     """Read the processed log once and return the set of already-processed message-ids.
 
@@ -797,7 +823,8 @@ class MailKeeper:
         Returns:
             A :class:`WorkflowResult`: ``skipped`` (admin_repo unset or index missing),
             ``ok`` (no new mail, or a successful agent run with an unchanged backup tree),
-            or ``error`` (agent failure, guardrail trip, or an unexpected exception).
+            or ``error`` (agent failure, agent step-cap exhaustion (sentinel on the final
+            message), guardrail trip, or an unexpected exception).
 
         Side Effects:
             Read-only notmuch + filesystem; on the no-new-mail and agent-``ok`` paths it
@@ -916,6 +943,19 @@ class MailKeeper:
         if agent.status in {"error", "timeout"}:
             errors.append(
                 f"agent run {agent.status}: {agent.error} (duration {agent.duration_seconds:.0f}s)"
+            )
+            return WorkflowResult(
+                status="error", items_found=len(merged), actions=actions, errors=errors
+            )
+
+        # Step-exhaustion sentinel: opencode exits 0 when the agent hits its frontmatter step cap,
+        # with the boilerplate as final message. Without this check the run would be recorded ok —
+        # processed log + cursors advanced — for triage that never completed (Run-A incident,
+        # 2026-10-25). Treat as failure: no log append, no cursor advance, batch re-presented.
+        if agent.status == "ok" and _is_step_exhausted(agent.final_text):
+            errors.append(
+                "agent hit its step cap (opencode exited 0 with step-exhaustion boilerplate) — "
+                "treating as failure; batch re-presented next run"
             )
             return WorkflowResult(
                 status="error", items_found=len(merged), actions=actions, errors=errors
