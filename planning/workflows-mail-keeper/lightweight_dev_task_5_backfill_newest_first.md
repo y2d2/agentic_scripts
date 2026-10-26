@@ -495,3 +495,47 @@ unchanged). **Consequence:** 10 messages (log records stamped `2026-10-25T08:59:
 
 - Exactly `src/agentic_scripts/workflows/mail_keeper.py` + `tests/test_mail_keeper.py` + this result file;
   `OC:`-prefixed; pushed to `plan/agentic-workflows` (commit hash recorded by the orchestrator's push).
+
+---
+
+# Task 5i — mail-keeper step cap 40 → 80 (user-approved, 2026-10-25)
+
+## Context (Run-A) + user approval
+
+Run A (2026-10-25) burned **41 tool calls in 19 min** and hit the `steps: 40` frontmatter cap mid-triage.
+The Task-5h sentinel made that safe (a step-exhausted "ok" is now a failure, batch re-presented), but each
+exhaustion still wastes ~20 min across the ~300-run backfill grind. **User explicitly approved** raising the
+step cap 40 → 80 (2026-10-25) to give the local Qwen3.8-27B model enough room to complete triage in one pass.
+
+## Edits (before/after)
+
+1. **`/root/.config/opencode/agents/mail-keeper.md`** (agent definition — this ONE file is user-approved;
+   touch nothing else in that directory): frontmatter `steps: 40` → `steps: 80`.
+   - *Note:* this agent-definition file lives in the config dir and is **not a git repo** — it is on disk but
+     not committed anywhere (only the repo files below are committed).
+2. **`config/workflows.yaml`:** `max_steps: 40` → `max_steps: 80` (informational; mirrors the frontmatter).
+   Comment updated to stay accurate: "informational; mirrors the agent frontmatter `steps` (raised 40→80,
+   user-approved 2026-10-25)".
+
+## Test-grep findings (step 3)
+
+Grep for hard-coded `40` step assumptions across `tests/`:
+- **`tests/test_agent.py:95`** (`max_steps=40`) — a fixture building its own `Agent` object directly (arbitrary
+  param, does NOT read the shipped config). Not an assumption of the shipped value; **no change needed**.
+- **`tests/test_mail_keeper.py:1160,1195`** — the step-exhaustion boilerplate string and the `_is_step_exhausted`
+  unit test (Task 5h); unrelated to the numeric cap. No change needed.
+- **`tests/smoke/*`** — the mail-keeper smoke sets its own values; no `max_steps=40` assumption. No change needed.
+- **`src/agentic_scripts/config.py`** — only validates `max_steps` (integer ≥ 1); no assertion on the shipped value.
+
+**Conclusion: no test changes required.**
+
+## Build / test
+
+- `uv run pytest -q` → **113 passed** (no ignores).
+- `uv run ruff check .` clean.
+
+## Commit
+
+- Repo files only: exactly `config/workflows.yaml` + this result file; `OC: mail-keeper step cap 40 -> 80
+  (user-approved)`; pushed to `plan/agentic-workflows` (commit hash recorded by the orchestrator's push). The
+  agent-definition file (`/root/.config/opencode/agents/mail-keeper.md`) is not a git repo and is not committed.
