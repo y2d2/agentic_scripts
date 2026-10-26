@@ -539,3 +539,43 @@ Grep for hard-coded `40` step assumptions across `tests/`:
 - Repo files only: exactly `config/workflows.yaml` + this result file; `OC: mail-keeper step cap 40 -> 80
   (user-approved)`; pushed to `plan/agentic-workflows` (commit hash recorded by the orchestrator's push). The
   agent-definition file (`/root/.config/opencode/agents/mail-keeper.md`) is not a git repo and is not committed.
+
+---
+
+# Task 5j — Raise agent timeout to 180 min (host-load headroom)
+
+## Context (Run B timeout evidence)
+
+**Run B** (2026-10-26 11:36 UTC, `--force`) hit the `timeout_minutes: 120` hard kill at **7200.2 s**
+(`status=timeout`, agent still working at the kill — step 41 at 13:35). Today's machine load is **10–12**
+(user actively working), ~2× slower than last night's quiet runs (47–60 min); under load this agent needs
+**~125–140 min** for a 10-message batch, so 120 min is too short. Raised `agent.timeout_minutes` from `120` to
+**`180`**.
+
+## Change
+
+- **`config/workflows.yaml`:** `timeout_minutes: 120` → `timeout_minutes: 180`. Trailing comment updated to stay
+  accurate: "per-workflow hard timeout for the agent run (local Qwen3.8-27B runs 47–140 min depending on host load)".
+
+## Test-grep findings (step 1)
+
+Grep for a hard-coded `120` timeout assumption across `tests/`:
+- **`tests/smoke/test_smoke_mail_keeper.py:572`** — the mail-keeper smoke sets its own value (`timeout_minutes = 5`);
+  not an assumption of the shipped value. No change needed.
+- **`tests/test_agent.py:96`** — a fixture building its own `Agent` object directly (`timeout_minutes=1`, arbitrary
+  param, does NOT read the shipped config). No change needed.
+- **`tests/test_mail_keeper.py:1341`** — `timeout=120` is the subprocess wall-clock limit for the in-process base-smoke
+  run (unrelated to the shipped config value). No change needed.
+- **`src/agentic_scripts/config.py`** — only validates `timeout_minutes` (integer ≥ 1); no assertion on the shipped value.
+
+**Conclusion: no test changes required.**
+
+## Build / test
+
+- `uv run pytest -q` → **113 passed** (no ignores).
+- `uv run ruff check .` clean.
+
+## Commit
+
+- Exactly `config/workflows.yaml` + this result file; `OC: Raise agent timeout to 180 min (host-load headroom)`;
+  pushed to `plan/agentic-workflows` (commit hash recorded by the orchestrator's push).

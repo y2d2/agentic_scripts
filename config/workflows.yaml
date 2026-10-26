@@ -11,7 +11,7 @@ agent:
   binary: opencode
   model: openaiCompatible/Qwen3.8-27B   # string or null; null = agent's own frontmatter model
   max_steps: 80            # informational; mirrors the agent frontmatter `steps` (raised 40→80, user-approved 2026-10-25)
-  timeout_minutes: 120     # per-workflow hard timeout for the agent run (local Qwen3.8-27B runs 55–96 min)
+  timeout_minutes: 180     # per-workflow hard timeout for the agent run (local Qwen3.8-27B runs 47–140 min depending on host load)
   auto_approve: true       # pass --auto to opencode run
 paths:
   state_dir: state         # relative paths resolve against the project root
