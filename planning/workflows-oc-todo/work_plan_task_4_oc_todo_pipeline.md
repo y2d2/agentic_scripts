@@ -24,6 +24,17 @@ Project: `/workspace/Python/agentic_scripts` (Python ≥3.12, `uv`, src layout).
 
 ## Tasks
 
+### Task 0: Fix `render_pr_title` comment-decoration stripping (precondition fix)
+- **Files:** `src/agentic_scripts/workflows/oc_todo.py` (modify), `tests/test_oc_todo.py` (modify)
+- **Do:** The Task-3 implementation strips `MARKER_PREFIX` only when the marker *starts* with it, so the typical marker shape `# OC-todo: fix bug A` yields the PR title `OC: # OC-todo: fix bug A` (comment decoration leaks into the title and — via Task 4 step 6 — the commit message). Change `render_pr_title` to:
+  1. `body = marker.strip()`
+  2. Strip ONE leading comment decoration + following whitespace: `re.sub(r"^(?://|#|;|%|--)\s*", "", body)` (applies before the prefix strip, so `# OC-todo: x` and bare `OC-todo: x` both work).
+  3. Strip the leading `MARKER_PREFIX` if present.
+  4. Collapse whitespace, truncate at 72 chars, prefix `"OC: "`.
+  Update the docstring (Purpose) to state the decoration-stripping rule. Extend `test_render_pr_title_strip_collapse_truncate` (or add siblings): `# OC-todo: fix bug A` → `OC: fix bug A`; `%OC-todo: do x` → `OC: do x`; bare `OC-todo: fix` → `OC: fix`; 200-char marker still truncates at 72 (keep the existing assertions that still hold).
+- **Acceptance:** `uv run pytest tests/test_oc_todo.py -v` green (including the new cases); full suite green; ruff clean.
+- **Why now:** this title feeds the PR title and the commit message in the pipeline below — fixing it before any pipeline test exists keeps those tests' expectations honest.
+
 ### Task 1: `Git.prune_worktrees` (git.py, additive)
 - **Files:** `src/agentic_scripts/git.py` (modify — additions only)
 - **Do:** `prune_worktrees(self, repo: Path) -> None` — `git -C <repo> worktree prune` (`_TIMEOUT_LOCAL`, `GitError` on failure). Used to deregister worktree entries whose directories were removed out from under git (crash recovery).

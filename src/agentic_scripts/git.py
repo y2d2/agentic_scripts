@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -55,13 +56,23 @@ class Git:
     _TIMEOUT_LOCAL = 60
     _TIMEOUT_REMOTE = 300
 
-    def _run(self, op: str, argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        op: str,
+        argv: list[str],
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         """Run one git command and raise GitError on non-zero exit or timeout.
 
         Args:
             op: The operation name (e.g. ``"clone"``), used in error messages.
             argv: The full argv list, starting with ``"git"``.
             timeout: Per-operation timeout in seconds.
+            env: Optional environment for the child process; None inherits the current
+                environment (the default). Callers pass a merged dict to inject auth
+                config without putting secrets in argv.
 
         Returns:
             The completed process (stdout/stderr captured as text).
@@ -72,7 +83,7 @@ class Git:
         """
         try:
             return subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout, check=False
+                argv, capture_output=True, text=True, timeout=timeout, check=False, env=env
             )
         except subprocess.TimeoutExpired as exc:
             raise GitError(
@@ -151,7 +162,14 @@ class Git:
         self._check("rev_parse", proc)
         return proc.stdout.strip()
 
-    def clone(self, url: str, path: Path, *, depth: int | None = None) -> None:
+    def clone(
+        self,
+        url: str,
+        path: Path,
+        *,
+        depth: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
         """Clone ``url`` into ``path`` (local-path URLs supported; no auth handling).
 
         Args:
@@ -159,6 +177,10 @@ class Git:
                 network, no credentials in the argument; PATs come from the environment).
             path: Destination directory; its parent must already exist.
             depth: Optional shallow-clone depth (``--depth N``); None for full clones.
+            env: Optional extra environment variables for the child process. When given,
+                the subprocess runs with ``{**os.environ, **env}`` — used to inject git
+                auth config env (``GIT_CONFIG_*``) so PATs never appear in argv. None
+                keeps the existing behaviour (the inherited environment).
 
         Raises:
             GitError: On any failure (e.g. auth failure, missing destination) — the
@@ -168,18 +190,42 @@ class Git:
         if depth is not None:
             argv += ["--depth", str(depth)]
         argv += [url, str(path)]
-        proc = self._run("clone", argv, timeout=self._TIMEOUT_REMOTE)
+        proc = self._run(
+            "clone",
+            argv,
+            timeout=self._TIMEOUT_REMOTE,
+            env={**os.environ, **env} if env is not None else None,
+        )
         self._check("clone", proc)
 
-    def fetch(self, path: Path, remote: str = "origin") -> None:
+    def fetch(
+        self,
+        path: Path,
+        remote: str = "origin",
+        *,
+        prune: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> None:
         """Fetch all refs from ``remote`` into the repo at ``path``.
 
         Args:
             path: A path inside the repository.
             remote: Remote name to fetch from (default ``"origin"``).
+            prune: When True (the default), pass ``--prune`` so stale remote-tracking
+                refs disappear when their branch is deleted upstream. Set False to keep
+                them (e.g. a local bare remote where pruning is harmless but unneeded).
+            env: Optional extra environment variables for the child process (see
+                :meth:`clone`). None keeps the existing behaviour.
         """
+        argv = ["git", "-C", str(path), "fetch"]
+        if prune:
+            argv.append("--prune")
+        argv.append(remote)
         proc = self._run(
-            "fetch", ["git", "-C", str(path), "fetch", remote], timeout=self._TIMEOUT_REMOTE
+            "fetch",
+            argv,
+            timeout=self._TIMEOUT_REMOTE,
+            env={**os.environ, **env} if env is not None else None,
         )
         self._check("fetch", proc)
 
@@ -309,3 +355,108 @@ class Git:
         argv += [remote, branch]
         proc = self._run("push", argv, timeout=self._TIMEOUT_REMOTE)
         self._check("push", proc)
+
+    def grep_fixed(
+        self, repo: Path, ref: str, pattern: str, *, exclude_standard: bool = False
+    ) -> list[str]:
+        """Fixed-string grep of ``ref``'s tree for lines containing ``pattern``.
+
+        Purpose:
+            The OC-todo scanner's primitive: find every occurrence of the marker on a
+            specific branch ref without checking it out. Runs ``git -C <repo> grep -n
+            -F -I -e <pattern> <ref>`` and returns the raw output lines, each of the shape
+            ``<ref>:<file>:<line>:<content>``.
+
+        Rationale:
+            ``-F`` treats ``pattern`` as a fixed string (no regex metacharacters) and
+            ``-I`` skips binary files — together they are the "standard binary/build
+            exclusions" for a *committed* ref (build artifacts are not committed, so there
+            is nothing to ignore). Exit code 1 is git grep's "no match" code (not an error)
+            and yields ``[]``; any other non-zero exit raises :class:`GitError` via
+            :meth:`_check`.
+
+        Note:
+            ``--exclude-standard`` is deliberately NOT passed for a ref: it only applies to
+            *untracked* files, and git errors out (exit 128) when it is combined with a
+            committed ref — the scanner always greps a ref, so the flag would break every
+            call. The ``exclude_standard`` parameter is retained for API stability but is
+            intentionally inert here (documented; see the Task 3 result report).
+
+        Args:
+            repo: A path inside the repository to run in.
+            ref: The revision to grep (e.g. ``"origin/dev"``).
+            pattern: The fixed string to search for (e.g. ``"OC-todo:"``).
+            exclude_standard: Retained for API stability; ignored when grepping a ref
+                (see the Note — ``--exclude-standard`` is incompatible with tracked
+                contents and would make every call fail).
+
+        Returns:
+            The raw output lines (one per match), empty when there is no match.
+
+        Raises:
+            GitError: On any genuine failure (bad ref, missing repo) — exit 1 is the
+                documented "no match" code and does not raise.
+        """
+        argv = ["git", "-C", str(repo), "grep", "-n", "-F", "-I", "-e", pattern]
+        # NOTE: --exclude-standard is intentionally omitted — it is incompatible with a
+        # committed ref (git exits 128); the scanner always greps a ref. See the Note above.
+        argv.append(ref)
+        proc = self._run("grep_fixed", argv, timeout=self._TIMEOUT_LOCAL)
+        if proc.returncode == 1:
+            return []  # git grep's "no match" code — not an error
+        self._check("grep_fixed", proc)
+        return proc.stdout.splitlines()
+
+    def show_file(self, repo: Path, ref: str, path: str) -> str:
+        """Return the content of ``path`` as it exists at ``ref``.
+
+        Purpose:
+            Read a single file from an arbitrary revision without checking it out — the
+            OC-todo workflow uses this to pull the keep-instruction context window around
+            a marker line (the marker line plus the next :data:`KEEP_CONTEXT_LINES` lines).
+
+        Args:
+            repo: A path inside the repository to run in.
+            ref: The revision to read from (e.g. ``"origin/dev"``).
+            path: The file path relative to the repository root.
+
+        Returns:
+            The file content with its trailing newline removed.
+
+        Raises:
+            GitError: If the path does not exist at ``ref`` (or ``ref`` is bad) — git's
+                stderr tail names the missing path.
+        """
+        proc = self._run(
+            "show_file",
+            ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+            timeout=self._TIMEOUT_LOCAL,
+        )
+        self._check("show_file", proc)
+        return proc.stdout.rstrip("\n")
+
+    def delete_branch(self, path: Path, branch: str, *, force: bool = True) -> None:
+        """Delete the local branch ``branch`` in the repo at ``path``.
+
+        Purpose:
+            Clean up a per-todo worktree branch after its PR is merged or the todo is
+            resolved. The caller pre-checks existence via :meth:`rev_parse`; this method
+            does not — a missing branch raises :class:`GitError`.
+
+        Args:
+            path: A path inside the repository.
+            branch: The local branch name to delete.
+            force: When True (default) use ``-D`` (delete even if unmerged); when False
+                use ``-d`` (delete only if merged).
+
+        Raises:
+            GitError: If the branch does not exist or is not safe to delete without
+                ``force`` — the message carries git's stderr tail.
+        """
+        flag = "-D" if force else "-d"
+        proc = self._run(
+            "delete_branch",
+            ["git", "-C", str(path), "branch", flag, branch],
+            timeout=self._TIMEOUT_LOCAL,
+        )
+        self._check("delete_branch", proc)

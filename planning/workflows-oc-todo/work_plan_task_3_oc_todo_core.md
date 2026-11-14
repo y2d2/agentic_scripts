@@ -166,3 +166,8 @@ Read first:
 - `[Decision]` `pr_state = None` (API failure) on a `pr_open` todo → skip, never re-process (API-outage guardrail).
 - `[Assumption]` Keep-instruction = `oc-original` (case-insensitive) in the marker line or the next 3 lines.
 - `re` import for the grep-line regex; `hashlib` for `todo_id` — both stdlib.
+
+## Amendment (2026-11-14, post-implementation)
+
+- **[Amendment]** `render_pr_title` as originally specified ("strip the leading `MARKER_PREFIX`") leaves comment decoration behind for the typical marker shape (`# OC-todo: ...` → `OC: # OC-todo: ...`). Correct semantics — implemented as **Task 0 of `work_plan_task_4_oc_todo_pipeline.md`**: strip leading comment decoration (`#`/`//`/`;`/`%`/`--` + whitespace), then the `OC-todo:` prefix, then collapse + truncate. The PR body still quotes the marker verbatim (unchanged); only the PR title and commit message are affected.
+- **[Accepted deviation]** `grep_fixed` does not pass `--exclude-standard` when grepping a ref (git exits 128 for tracked contents — verified by the dev and re-verified by the orchestrator). The param stays (inert, documented); binary exclusion is carried by `-I`. Task 4 must not rely on that flag.
