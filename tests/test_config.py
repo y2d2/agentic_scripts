@@ -134,3 +134,89 @@ def test_quiet_window_start_equals_end_rejected(tmp_path: Path) -> None:
     data["machine"]["quiet_window"]["end"] = "08:00"
     with pytest.raises(ConfigError):
         load_config(_write(tmp_path, data))
+
+
+# --- oc_todo section ---------------------------------------------------------
+
+
+def test_oc_todo_absent_defaults(base_config) -> None:
+    """A config without an ``oc_todo`` section loads empty defaults (no-op)."""
+    assert base_config.oc_todo.repos == []
+    assert base_config.oc_todo.max_todos_per_repo == 3
+    assert base_config.oc_todo.test_commands == {}
+    assert base_config.oc_todo.repo_urls == {}
+
+
+def test_oc_todo_valid_section_roundtrip(tmp_path: Path) -> None:
+    """A valid ``oc_todo`` section parses to the exact expected values."""
+    data = _base(tmp_path)
+    data["oc_todo"] = {
+        "repos": ["owner/one", "owner/two"],
+        "max_todos_per_repo": 5,
+        "test_commands": {"owner/one": "uv run pytest"},
+        "repo_urls": {"owner/two": "/tmp/local.git"},
+    }
+    cfg = load_config(_write(tmp_path, data))
+    assert cfg.oc_todo.repos == ["owner/one", "owner/two"]
+    assert cfg.oc_todo.max_todos_per_repo == 5
+    assert cfg.oc_todo.test_commands == {"owner/one": "uv run pytest"}
+    assert cfg.oc_todo.repo_urls == {"owner/two": "/tmp/local.git"}
+
+
+@pytest.mark.parametrize("bad", ["no-slash", "a/b/c", ""])
+def test_oc_todo_bad_repo_string(tmp_path: Path, bad: str) -> None:
+    """A malformed repo id names oc_todo.repos[0]."""
+    data = _base(tmp_path)
+    data["oc_todo"] = {"repos": [bad]}
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "oc_todo.repos[0]" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", [0, "three"])
+def test_oc_todo_bad_max_todos_per_repo(tmp_path: Path, bad: object) -> None:
+    """An out-of-range or non-int cap names oc_todo.max_todos_per_repo."""
+    data = _base(tmp_path)
+    data["oc_todo"] = {"repos": ["owner/one"], "max_todos_per_repo": bad}
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "oc_todo.max_todos_per_repo" in str(exc.value)
+
+
+def test_oc_todo_test_commands_key_not_in_repos(tmp_path: Path) -> None:
+    """A test_commands key absent from repos names oc_todo.test_commands.<repo>."""
+    data = _base(tmp_path)
+    data["oc_todo"] = {
+        "repos": ["owner/one"],
+        "test_commands": {"other/repo": "uv run pytest"},
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "oc_todo.test_commands.other/repo" in str(exc.value)
+
+
+def test_oc_todo_repo_urls_key_not_in_repos(tmp_path: Path) -> None:
+    """A repo_urls key absent from repos names oc_todo.repo_urls.<repo>."""
+    data = _base(tmp_path)
+    data["oc_todo"] = {
+        "repos": ["owner/one"],
+        "repo_urls": {"other/repo": "/tmp/local.git"},
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "oc_todo.repo_urls.other/repo" in str(exc.value)
+
+
+def test_oc_todo_not_a_mapping(tmp_path: Path) -> None:
+    """An ``oc_todo`` section that is not a mapping names oc_todo."""
+    data = _base(tmp_path)
+    data["oc_todo"] = ["owner/one"]
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "oc_todo" in str(exc.value)
+
+
+def test_shipped_config_without_oc_todo_still_loads(project_root: Path) -> None:
+    """The shipped config (pre-Task-5, no oc_todo section) still loads."""
+    cfg = load_config(project_root / "config" / "workflows.yaml")
+    assert cfg.oc_todo.repos == []

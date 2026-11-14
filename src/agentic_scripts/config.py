@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import importlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import time
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,10 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+# Default cap on the number of OC-todos *processed* per repo per run. A user-tunable
+# knob (the ``oc_todo.max_todos_per_repo`` section field); see Task 1 plan GATE note.
+DEFAULT_MAX_TODOS_PER_REPO = 3
 
 
 class ConfigError(Exception):
@@ -185,6 +189,41 @@ class WorkflowEntry:
 
 
 @dataclass(frozen=True)
+class OCTodo:
+    """OC-todo workflow settings (repos to scan, caps, per-repo overrides).
+
+    Attributes:
+        repos: Ordered list of GitHub repo ids in ``owner/name`` form. An empty list
+            means the workflow has nothing to scan and no-ops for that run.
+        max_todos_per_repo: Maximum number of OC-todos *processed* per repo per run.
+            Must be an int >= 1; defaults to :data:`DEFAULT_MAX_TODOS_PER_REPO`.
+        test_commands: Optional per-repo test command (e.g. ``"uv run pytest"``). Keys
+            must be members of :attr:`repos`; values are non-empty strings. Empty when
+            no overrides are configured.
+        repo_urls: Optional clone-URL override per repo (a local path or a URL; the
+            hermetic-test/mirror seam). Keys must be members of :attr:`repos`; values
+            are non-empty strings. Empty when no overrides are configured.
+
+    Note:
+        An empty ``repos`` list means the workflow no-ops: there is nothing to scan, so
+        downstream tasks (3–5) skip the run entirely.
+    """
+
+    repos: list[str]
+    max_todos_per_repo: int
+    test_commands: dict[str, str]
+    repo_urls: dict[str, str]
+
+
+_EMPTY_OC_TODO = OCTodo(
+    repos=[],
+    max_todos_per_repo=DEFAULT_MAX_TODOS_PER_REPO,
+    test_commands={},
+    repo_urls={},
+)
+
+
+@dataclass(frozen=True)
 class Config:
     """The fully validated, typed agentic_scripts configuration.
 
@@ -194,6 +233,8 @@ class Config:
         paths: Resolved state/log/sandbox directories.
         admin_repo: Path to the admin (roadmap) repo, or None if not configured.
         workflows: Registered workflow entries, preserving YAML document order.
+        oc_todo: OC-todo workflow settings; empty defaults when the ``oc_todo`` section
+            is absent.
     """
 
     machine: Machine
@@ -201,6 +242,7 @@ class Config:
     paths: Paths
     admin_repo: Path | None
     workflows: list[WorkflowEntry]
+    oc_todo: OCTodo = field(default_factory=lambda: _EMPTY_OC_TODO)
 
 
 def _parse_hhmm(value: Any, field: str) -> time:
@@ -469,6 +511,70 @@ def _load_workflows(data: dict[str, Any]) -> list[WorkflowEntry]:
     return entries
 
 
+_REPO_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _load_oc_todo(data: dict[str, Any]) -> OCTodo:
+    """Validate and build the optional ``oc_todo`` section.
+
+    Args:
+        data: The raw mapping under the ``oc_todo`` key (already confirmed to be a
+            mapping by the caller via :func:`_require_mapping`).
+
+    Returns:
+        A validated :class:`OCTodo`.
+
+    Raises:
+        ConfigError: If any field is invalid — each error names the offending dotted
+            field (e.g. ``oc_todo.repos[0]``, ``oc_todo.test_commands.owner/name``).
+    """
+    section = "oc_todo"
+
+    # repos: required key in the section (present but may be []); a list of owner/name.
+    raw_repos = _require_key(section, data, "repos")
+    if not isinstance(raw_repos, list):
+        raise ConfigError(f"{section}.repos", "must be a list of 'owner/name' repo ids")
+    repos: list[str] = []
+    for i, entry in enumerate(raw_repos):
+        field_name = f"{section}.repos[{i}]"
+        if not isinstance(entry, str) or not _REPO_ID_RE.match(entry):
+            raise ConfigError(field_name, "must be a 'owner/name' repo id")
+        repos.append(entry)
+
+    # max_todos_per_repo: optional; default DEFAULT_MAX_TODOS_PER_REPO; int >= 1.
+    max_todos = data.get("max_todos_per_repo", DEFAULT_MAX_TODOS_PER_REPO)
+    if not isinstance(max_todos, int) or isinstance(max_todos, bool):
+        raise ConfigError(f"{section}.max_todos_per_repo", "must be an integer")
+    if max_todos < 1:
+        raise ConfigError(f"{section}.max_todos_per_repo", "must be >= 1")
+
+    # test_commands / repo_urls: optional; default {}; keys must be in repos, values
+    # non-empty strings.
+    def _load_repo_map(key: str) -> dict[str, str]:
+        raw = data.get(key, {})
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{section}.{key}", "must be a mapping of repo -> string")
+        out: dict[str, str] = {}
+        for repo, value in raw.items():
+            field_name = f"{section}.{key}.{repo}"
+            if repo not in repos:
+                raise ConfigError(field_name, "repo is not in oc_todo.repos")
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(field_name, "must be a non-empty string")
+            out[repo] = value
+        return out
+
+    test_commands = _load_repo_map("test_commands")
+    repo_urls = _load_repo_map("repo_urls")
+
+    return OCTodo(
+        repos=repos,
+        max_todos_per_repo=max_todos,
+        test_commands=test_commands,
+        repo_urls=repo_urls,
+    )
+
+
 def load_config(path: Path) -> Config:
     """Read and validate the canonical agentic_scripts configuration file.
 
@@ -478,7 +584,9 @@ def load_config(path: Path) -> Config:
 
     Returns:
         A fully validated :class:`Config`. Relative ``paths.*`` values are resolved
-        against :data:`PROJECT_ROOT`; ``workflows`` preserves YAML document order.
+        against :data:`PROJECT_ROOT`; ``workflows`` preserves YAML document order; the
+        optional ``oc_todo`` section loads into :attr:`Config.oc_todo` (empty defaults
+        when absent).
 
     Raises:
         ConfigError: If the file is missing, not valid YAML, has an unknown or
@@ -502,7 +610,7 @@ def load_config(path: Path) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError(str(path), "top-level document must be a mapping")
 
-    allowed_sections = {"machine", "agent", "paths", "admin_repo", "workflows"}
+    allowed_sections = {"machine", "agent", "paths", "admin_repo", "workflows", "oc_todo"}
     for key in raw:
         if key not in allowed_sections:
             raise ConfigError(key, "unknown top-level section")
@@ -525,10 +633,17 @@ def load_config(path: Path) -> Config:
 
     workflows = _load_workflows(_require_mapping("workflows", raw["workflows"]))
 
+    oc_todo_raw = raw.get("oc_todo")  # optional; empty defaults when absent
+    if oc_todo_raw is not None:
+        oc_todo = _load_oc_todo(_require_mapping("oc_todo", oc_todo_raw))
+    else:
+        oc_todo = _EMPTY_OC_TODO
+
     return Config(
         machine=machine,
         agent=agent,
         paths=paths,
         admin_repo=admin_repo,
         workflows=workflows,
+        oc_todo=oc_todo,
     )
