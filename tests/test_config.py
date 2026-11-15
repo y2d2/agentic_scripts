@@ -55,8 +55,8 @@ def test_shipped_config_loads(project_root: Path) -> None:
     )
     assert str(cfg.paths.state_dir).startswith(str(PROJECT_ROOT))
 
-    # Workflow order preserved from YAML: [noop, mail-keeper].
-    assert [w.name for w in cfg.workflows] == ["noop", "mail-keeper"]
+    # Workflow order preserved from YAML: [noop, mail-keeper, oc-todo].
+    assert [w.name for w in cfg.workflows] == ["noop", "mail-keeper", "oc-todo"]
     # noop has no agent.
     assert cfg.workflows[0].agent is None
 

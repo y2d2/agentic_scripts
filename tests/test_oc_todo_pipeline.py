@@ -164,14 +164,15 @@ class FakeGitHub:
         self.create_calls: list[dict] = []
 
     def find_pr_by_head(self, owner: str, repo: str, head_branch: str) -> dict | None:
-        """Return the first stored PR whose head is ``owner/repo:head_branch``, else None.
+        """Return the first stored PR whose head is ``owner:head_branch``, else None.
 
         Note:
-            The real GitHub API's list endpoint filters by ``head={owner}:{branch}``, but
-            the create endpoint takes a full ``owner/repo:branch`` ref. This fake matches on
-            the full repo id to stay consistent with how :meth:`create_pr` stores the head.
+            Mirrors the real GitHub API's list endpoint, which filters by
+            ``head={owner}:{branch}`` — a single owner account plus the branch (no repo name).
+            This fake matches on that same ``owner:branch`` shape so it stays consistent with
+            how :meth:`create_pr` stores the head.
         """
-        target = f"{owner}/{repo}:{head_branch}"
+        target = f"{owner}:{head_branch}"
         for pr in self.prs:
             if pr.get("head") == target:
                 return pr
@@ -441,7 +442,7 @@ def test_two_branches_two_prs(tmp_path: Path) -> None:
     by_base = {pr["base"]: pr for pr in fake_gh.prs}
     assert set(by_base) == {"main", "dev"}
     for pr in fake_gh.prs:
-        assert re.match(r"^fixture/owner-repo:oc-todo/[0-9a-f]{12}$", pr["head"])
+        assert re.match(r"^fixture:oc-todo/[0-9a-f]{12}$", pr["head"])
     # Each PR body quotes the exact marker verbatim + file path + line number.
     main_pr = by_base["main"]
     assert MARKER_A in main_pr["body"]
@@ -760,5 +761,5 @@ def test_orphan_branch_resumes_without_agent(tmp_path: Path) -> None:
     # A PR was created from the orphan branch (head = that branch, base = main).
     a_prs = [pr for pr in fake_gh.prs if pr["base"] == "main"]
     assert len(a_prs) == 1
-    assert a_prs[0]["head"] == f"{REPO}:{branch}"
+    assert a_prs[0]["head"] == f"fixture:{branch}"
     assert "Branch reused from a previous run" in a_prs[0]["body"]

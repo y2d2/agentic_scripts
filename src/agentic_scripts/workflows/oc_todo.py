@@ -52,7 +52,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agentic_scripts.config import OCTodo
+from agentic_scripts.config import Config, OCTodo
 from agentic_scripts.git import Git, GitError
 from agentic_scripts.github import GitHubClient, GitHubError
 from agentic_scripts.workflows.base import WorkflowResult
@@ -732,6 +732,32 @@ def apply_cap(todos: list[Todo], cap: int) -> tuple[list[Todo], list[Todo]]:
 # --- Workflow shell ---------------------------------------------------------- #
 
 
+def create(config: Config) -> "OCTodoWorkflow":  # noqa: UP037 - forward ref; class defined below
+    """Create and return an :class:`OCTodoWorkflow` instance (the scheduler's entry point).
+
+    Purpose:
+        Production wiring for the config loader's import-check of enabled entries and the
+        scheduler's per-run construction: build the workflow from the validated ``oc_todo``
+        settings, using the real :class:`Git` and :class:`GitHubClient` collaborators (the
+        constructor defaults) and leaving ``runner`` as None so it is resolved lazily from
+        ``ctx.runner`` at call time.
+
+    Args:
+        config: The fully validated :class:`~agentic_scripts.config.Config`; its
+            :attr:`Config.oc_todo` settings (repos, caps, per-repo test commands and
+            clone-URL overrides) are used to build the workflow.
+
+    Returns:
+        A new :class:`OCTodoWorkflow`, ready to be run by the scheduler.
+
+    Example:
+        >>> wf = create(config)  # doctest: +SKIP
+        >>> wf.name
+        'oc-todo'
+    """
+    return OCTodoWorkflow(settings=config.oc_todo)
+
+
 class OCTodoWorkflow:
     """The oc-todo workflow: one idempotent run over every configured repo.
 
@@ -1024,7 +1050,7 @@ class OCTodoWorkflow:
                 number, url = self._github.create_pr(
                     owner, name, title=render_pr_title(todo.marker),
                     body=render_pr_body(todo, todo.repo, sections, ctx.run_id) + body_note,
-                    head=f"{todo.repo}:{branch_name}", base=todo.branch,
+                    head=f"{owner}:{branch_name}", base=todo.branch,
                 )
             except GitHubError as exc:
                 return self._outcome("failed", f"create_pr failed: {exc}", None, None, commit_sha)
@@ -1086,7 +1112,7 @@ class OCTodoWorkflow:
             number, url = self._github.create_pr(
                 owner, name, title=render_pr_title(todo.marker),
                 body=render_pr_body(todo, todo.repo, sections, ctx.run_id),
-                head=f"{todo.repo}:{branch_name}", base=todo.branch,
+                head=f"{owner}:{branch_name}", base=todo.branch,
             )
             return self._outcome("pr_created", "PR created from fresh worktree", number, url,
                                  commit_sha)

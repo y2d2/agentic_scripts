@@ -210,6 +210,91 @@ The agent/skill lives in the global OpenCode config (`~/.config/opencode/agents/
 + `skills/mail-keeper/SKILL.md`). See the high-level plan at
 `planning/workflows-mail-keeper/work_plan.md`.
 
+## OC-todo workflow
+
+The `oc-todo` workflow resolves `OC-todo:` markers in configured GitHub repos into reviewable
+pull requests on every gate-open run. It scans each repo **across all branches** — a local full
+clone plus a per-branch `git grep` (the GitHub code-search API is rejected for this: it only
+considers the default branch, caps files at 384 KB, and is rate-limited to 10 req/min — see the
+[GitHub REST search docs](https://docs.github.com/en/rest/search/search); a local clone is
+deterministic, offline, and branch-complete) — and opens **one reviewable PR per unhandled
+`OC-todo:` marker** (strict, case-sensitive canonical form only).
+
+The Python runner owns all git/PR mechanics: clone/fetch, the per-branch scan, per-todo worktree
+setup, commit (`OC:` prefix), push of a fresh `oc-todo/<id>` branch, and PR creation. The headless
+`oc-todo-resolver` agent only edits code inside its sandboxed worktree — it implements the todo,
+removes the marker line (unless a keep-instruction applies), and runs the configured test command.
+There is no auto-merge: every PR is reviewed by a human before merging.
+
+### Configuration (`oc_todo.*`)
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `oc_todo.repos` | `[]` | Ordered list of GitHub repos to scan, in `owner/name` form. **Empty = no-op** (nothing to scan). |
+| `oc_todo.max_todos_per_repo` | `3` | Maximum number of todos *processed* per repo per run; the rest are deferred to later runs. |
+| `oc_todo.test_commands` | `{}` | Optional per-repo test command (e.g. `{ "owner/name": "uv run pytest" }`) the agent must pass before reporting. |
+| `oc_todo.repo_urls` | `{}` | Optional clone-URL override per repo (a local path or mirror — the hermetic-test seam). |
+
+### How a run works
+
+1. **Clone-or-fetch** each configured repo into `sandbox/oc-todo/clones/<owner>__<repo>`
+   (a PAT, if present, is injected as git-auth env — never argv).
+2. **Per-branch scan** every remote branch with `git grep` for the strict `OC-todo:` marker;
+   per todo, read the file to detect a keep-instruction.
+3. **State diff** against `state/oc-todo.json` (`pr_open` / `failed` / `resolved`) plus an
+   existing-PR check by head ref via REST — at most one API call per todo per run.
+4. **Per-todo worktree** branched from the branch that contained the marker (transient).
+5. **Agent** — one `oc-todo-resolver` invocation with a brief naming the marker, file:line,
+   branch, test command, and keep-instruction.
+6. **Commit** (`OC:` prefix) + **push** of the fresh `oc-todo/<id>` branch.
+7. **PR** — body quotes the marker verbatim (file/line) + the agent's report; no auto-merge.
+8. **State persist** (single atomic write, only when changed); caps apply and a failed todo is
+   retried on the next gate-open run.
+
+### Idempotency
+
+A re-run never duplicates a PR: state plus the existing-PR check skip any `pr_open` todo whose PR
+is still open; a merged PR (marker removed) flips the todo to `resolved`; and a GitHub API outage
+never re-creates a PR — an unknown PR state is treated as "skip + note", never a blind retry.
+
+### Keep-instruction
+
+A marker carrying an `oc-original` note (on the marker line or within the following 3 lines) keeps
+the comment line verbatim: the todo is implemented but the marker is not removed.
+
+### Operator commands
+
+```bash
+uv run agentic-scripts run --force --only oc-todo   # manual run (bypasses the gate)
+uv run agentic-scripts run                          # scheduled run (gate-checked)
+```
+
+### Where outputs live
+
+- PRs: on GitHub, one per resolved todo (review before merging).
+- Clones: `sandbox/oc-todo/clones/<owner>__<repo>` (full local clones).
+- Worktrees: transient, under `sandbox/oc-todo/wt/` (removed after each todo).
+- State: `state/oc-todo.json` (v1 schema: `{version, todos: {<todo_id>: entry}}`; one entry per
+  todo id with its status `pr_open` / `failed` / `resolved`).
+
+### Guardrails
+
+- **Fresh-branch-only pushes** — every pushed branch is a freshly created `oc-todo/<12-hex>`; no
+  protected or pre-existing branch is ever pushed.
+- **Caps** — per-repo per-run todo cap + the agent's step cap + a hard timeout bound each run.
+- **Per-todo failure → `failed` state**, retried on the next gate-open run (never a partial push).
+- **API-outage guardrail** — an unknown PR state is skipped with a note, never re-created blindly.
+- **Agent Blockers gate** — no PR is opened unless the agent's report carries no blockers.
+- **One PR per todo** for human review; no auto-merge.
+- **`GITHUB_PAT`** is required only when repos are configured (see the environment-variable table).
+
+> **First run:** the shipped config has an empty `oc_todo.repos` list, so the workflow is a no-op
+> until repos are added.
+
+The agent/skill lives in the global OpenCode config (`~/.config/opencode/agents/oc-todo-resolver.md`
++ `skills/oc-todo-resolver/SKILL.md`). See the high-level plan at
+`planning/workflows-oc-todo/workflows-oc-todo_plan.md`.
+
 ## Extending with a new workflow
 
 1. Add a module under `src/agentic_scripts/workflows/` exposing `create(config) -> Workflow`.

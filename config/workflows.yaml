@@ -18,6 +18,11 @@ paths:
   log_dir: logs
   sandbox_dir: sandbox
 admin_repo: /workspace/Obsidian/ARP_roadmap   # string or null
+oc_todo:
+  repos: []                  # GitHub repos to scan ("owner/name"); empty = no-op scan
+  max_todos_per_repo: 3      # max todos processed per repo per run
+  test_commands: {}          # optional per-repo test command, e.g. { "owner/name": "uv run pytest" }
+  repo_urls: {}              # optional clone-URL overrides per repo (local fixtures / mirrors)
 workflows:
   noop:
     enabled: true
@@ -27,3 +32,7 @@ workflows:
     enabled: true
     module: agentic_scripts.workflows.mail_keeper
     agent: mail-keeper
+  oc-todo:
+    enabled: true
+    module: agentic_scripts.workflows.oc_todo
+    agent: oc-todo-resolver
