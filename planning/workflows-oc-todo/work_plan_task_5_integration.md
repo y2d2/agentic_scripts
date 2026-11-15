@@ -24,6 +24,15 @@ Project: `/workspace/Python/agentic_scripts` (Python ≥3.12, `uv`, src layout).
 
 ## Tasks
 
+### Task 0: Fix the PR `head` ref format (precondition fix — production bug)
+- **Files:** `src/agentic_scripts/workflows/oc_todo.py` (modify), `tests/test_oc_todo_pipeline.py` (modify)
+- **Do:** The pipeline currently creates PRs with `head=f"{todo.repo}:{branch_name}"` (e.g. `fixture/owner-repo:oc-todo/<id>`) at BOTH `create_pr` call sites (orphan resume + fresh path). That is an INVALID GitHub head ref: the head field is `<account>:<branch>` — a single owner account, no repo name (GitHub would reject `owner/name:branch` with 422). The spec's own test assertion had the wrong shape and the implementation followed it (orchestrator-verified bug; the dev's note that this is "a test-fixture concern only" is incorrect — `head` is sent in the REST payload). Fix:
+  1. Both `create_pr(...)` call sites: `head=f"{owner}:{branch_name}"` (`owner, name = todo.repo.split("/", 1)` is already in scope at both sites).
+  2. `tests/test_oc_todo_pipeline.py`: update the head assertions to the correct shape — the pipeline test's `re.match(r"^fixture/owner-repo:oc-todo/[0-9a-f]{12}$", pr["head"])` → `r"^fixture:oc-todo/[0-9a-f]{12}$"`; the orphan-resume test's `a_prs[0]["head"] == f"{REPO}:{branch}"` → `f"fixture:{branch}"` (the owner account of the fixture repo).
+  3. `FakeGitHub.find_pr_by_head`: match `target = f"{owner}:{head_branch}"` (mirroring the real API's `head=<owner>:<branch>` filter) and update its docstring accordingly (drop the "full repo id" wording).
+  4. Re-verify: no other code/test references the `owner/name:branch` shape.
+- **Acceptance:** `uv run pytest tests/test_oc_todo_pipeline.py -v` green; full suite green; ruff clean.
+
 ### Task 1: `create(config)` entry point
 - **Files:** `src/agentic_scripts/workflows/oc_todo.py` (modify)
 - **Do:** `def create(config: Config) -> "OCTodoWorkflow"` — production wiring: `OCTodoWorkflow(settings=config.oc_todo)` (default `git`/`github` from the modules, `runner=None` → `ctx.runner` at call time). Docstring per the mail-keeper `create` pattern (the scheduler's entry point; import-check target for the enabled config entry).

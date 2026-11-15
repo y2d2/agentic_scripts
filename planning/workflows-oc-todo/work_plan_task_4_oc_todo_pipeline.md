@@ -146,3 +146,8 @@ Project: `/workspace/Python/agentic_scripts` (Python ≥3.12, `uv`, src layout).
 - `shutil` for the best-effort `rmtree` fallback (stdlib).
 - Watch the frozen `Todo`: use `dataclasses.replace` to set `keep`.
 - One `find_pr_by_head` per `pr_open` todo per run — do not call the API twice for the same todo (plan_run's classifier consumes the `pr_states` dict built in run step 3c).
+
+## Amendment (2026-11-15, post-implementation)
+
+- **[Accepted deviation]** The scan skips non-source branches (`HEAD`, `origin`, and `oc-todo/*`): the `oc-todo/*` skip is load-bearing (without it, a re-run re-detects markers on the workflow's own fix branches — permanent for keep-instruction markers — and would open duplicate PRs); the spec's test fixture also surfaced spurious `origin`/`HEAD` entries in the bare-clone world. A user source branch literally named `oc-todo/...` would be skipped (accepted).
+- **[Spec bug → fixed as Task 0 of Task 5]** This spec's test assertion `head == "fixture/owner-repo:oc-todo/<12hex>"` contradicted its own pipeline step (`head=f"{owner}:{branch}"`); the implementation followed the assertion, producing an INVALID GitHub head ref (`owner/name:branch` — the account part must be a single owner; GitHub rejects it with 422). The orchestrator verified the code; the correct fix (`head=f"{owner}:{branch}"` at both call sites + test/fake updates) is recorded as **Task 0 in `work_plan_task_5_integration.md`**.

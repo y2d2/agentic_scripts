@@ -1,17 +1,19 @@
-"""The ``oc-todo`` workflow core: marker scan parsing, todo identity, the state schema and
-run-planning decision table, and the brief / PR renderers — plus the pure helpers the
-pipeline needs. No orchestration yet (the ``run`` method lands in Task 4).
+"""The ``oc-todo`` workflow: marker scan parsing, todo identity, the state schema and
+run-planning decision table, the brief / PR renderers, and the full per-run pipeline.
 
 Purpose:
     Provide every helper the OC-todo pipeline needs as a small, independently
-    unit-testable function or dataclass: :func:`parse_grep_lines` (turn raw ``git grep``
+    unit-testable function or dataclass — :func:`parse_grep_lines` (turn raw ``git grep``
     output into :class:`Todo` objects), :func:`todo_id` / :func:`todo_branch_name`
     (stable identity + the fresh-branch invariant), the v1 state schema helpers
     (:func:`fresh_state`, :func:`validate_state`, :func:`make_entry`) and the pure
     classifier :func:`plan_run` (the decision table that maps current todos + recorded
-    state + PR lookups to one action per todo), and the byte-stable renderers
-    (:func:`render_brief`, :func:`render_pr_title`, :func:`render_pr_body`) plus the
-    agent-report parser :func:`extract_report_sections`.
+    state + PR lookups to one action per todo) — plus the byte-stable renderers
+    (:func:`render_brief`, :func:`render_pr_title`, :func:`render_pr_body`) and the
+    agent-report parser :func:`extract_report_sections`. The :class:`OCTodoWorkflow` class
+    wires these into one idempotent run: clone-or-fetch per repo, per-branch scan, state
+    diff, per-todo worktree, agent invocation, commit/push/PR, and a single atomic state
+    persist.
 
 Rationale:
     The scan model is a **local full clone + per-branch ``git grep``** (not the GitHub
@@ -41,14 +43,19 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+import os
 import re
-from dataclasses import dataclass
+import shutil
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from agentic_scripts.config import OCTodo
-from agentic_scripts.git import Git
-from agentic_scripts.github import GitHubClient
+from agentic_scripts.git import Git, GitError
+from agentic_scripts.github import GitHubClient, GitHubError
+from agentic_scripts.workflows.base import WorkflowResult
 
 # --- Constants --------------------------------------------------------------- #
 
@@ -76,6 +83,12 @@ _WT_SUBDIR = "wt"
 #: The keep-instruction scan window below the marker line (the marker line plus this many
 #: following lines are checked for an ``oc-original`` note).
 KEEP_CONTEXT_LINES = 3
+
+#: Sentinel passed to :meth:`OCTodoWorkflow._process_todo` when the caller has not already
+#: looked up the todo's PR. Disambiguates "no lookup performed yet" (→ do one) from a
+#: lookup that ran and found no PR (``None``) — so each todo costs at most ONE API call per
+#: run even when the classifier and the pipeline both want to know the PR state.
+_NOT_LOOKED_UP = object()
 
 
 # --- Identity and layout helpers --------------------------------------------- #
@@ -534,17 +547,31 @@ def render_pr_title(marker: str) -> str:
     """Render a PR title from a marker line.
 
     Purpose:
-        Produce ``"OC: " + <marker with the leading MARKER_PREFIX removed, whitespace-
-        collapsed, truncated to 72 chars>`` (no ellipsis — cut at char 72). The ``OC:``
-        prefix matches the repo's commit convention.
+        Produce ``"OC: " + <marker body, truncated to 72 chars>`` (no ellipsis — cut at
+        char 72). The ``OC:`` prefix matches the repo's commit convention. The body is the
+        marker with ONE leading comment decoration and its following whitespace stripped
+        first (``#``, ``//``, ``;``, ``%``, or ``--``), then the leading :data:`MARKER_PREFIX`
+        stripped if present, then whitespace-collapsed.
+
+    Rationale:
+        A typical marker is a comment line — ``# OC-todo: fix bug A`` — so stripping only
+        the prefix (the old behaviour) leaked the comment decoration into the title and, via
+        the pipeline's commit step, into the commit message. Stripping the decoration first
+        makes ``# OC-todo: x``, ``%OC-todo: x`` and a bare ``OC-todo: x`` all yield the same
+        clean body (``fix bug A`` / ``do x`` / ``fix``).
 
     Args:
-        marker: The exact marker line content (verbatim).
+        marker: The exact marker line content (verbatim, including any comment decoration).
 
     Returns:
-        The PR title string.
+        The PR title string (``"OC: " + <body[:72]>``).
     """
-    body = marker[len(MARKER_PREFIX) :] if marker.startswith(MARKER_PREFIX) else marker
+    body = marker.strip()
+    # Strip ONE leading comment decoration plus its following whitespace (applied before the
+    # prefix strip so a decorated marker and a bare marker both work).
+    body = re.sub(r"^(?://|#|;|%|--)\s*", "", body)
+    if body.startswith(MARKER_PREFIX):
+        body = body[len(MARKER_PREFIX) :]
     collapsed = " ".join(body.split())
     return "OC: " + collapsed[:72]
 
@@ -706,19 +733,22 @@ def apply_cap(todos: list[Todo], cap: int) -> tuple[list[Todo], list[Todo]]:
 
 
 class OCTodoWorkflow:
-    """The oc-todo workflow (shell only in this task — ``run`` lands in Task 4).
+    """The oc-todo workflow: one idempotent run over every configured repo.
 
     Purpose:
-        Hold the injected collaborators and expose the stable :attr:`name`. The pipeline
-        itself (clone/fetch, scan, worktree setup, agent invocation, commit/push/PR, state)
-        is added in Task 4; this class exists so the constructor-injection seam and the
-        name are testable now.
+        Hold the injected collaborators and expose the stable :attr:`name` plus a full
+        :meth:`run`: clone-or-fetch each repo, scan every branch for ``OC-todo:`` markers,
+        diff against durable state, and — per todo, in order — open (or resume) one PR on a
+        fresh ``oc-todo/<id>`` branch. Each run ends with a single atomic state persist.
 
     Rationale:
         Constructor injection (``git`` / ``github`` / ``runner``) is the hermetic-test seam:
         tests pass fakes for each collaborator, while production wiring (via ``create()`` in
         Task 5) passes the real :class:`Git`, :class:`GitHubClient`, and a runner resolved
-        from the context at call time.
+        from the context at call time. The pipeline never raises for business failures —
+        per-todo and per-repo faults are logged and reported in the :class:`WorkflowResult`
+        (``status="error"`` when any business error accumulated), and every repo is scanned
+        even if an earlier one failed.
 
     Attributes:
         name: The stable workflow name, matching its config key (``"oc-todo"``).
@@ -746,11 +776,578 @@ class OCTodoWorkflow:
                 ``ctx.runner`` at call time (Task 4).
 
         Note:
-            The injected collaborators are stored privately and used by the (Task 4) run
-            body; a None ``runner`` is not constructed here — it is resolved lazily so the
-            constructor stays side-effect free.
+            The injected collaborators are stored privately and used by the run body; a None
+            ``runner`` is not constructed here — it is resolved lazily from ``ctx.runner`` at
+            call time so the constructor stays side-effect free.
         """
         self._settings = settings
         self._git = git if git is not None else Git()
         self._github = github if github is not None else GitHubClient()
         self._runner_override = runner
+
+    # --- Pipeline helpers ---------------------------------------------------- #
+
+    def _repo_url(self, repo: str) -> str:
+        """Return the clone URL for ``repo`` (config override wins over the GitHub default).
+
+        Purpose:
+            Resolve where a repo is cloned from: an explicit ``oc_todo.repo_urls`` override
+            (a local path or mirror — the hermetic-test seam) when present, else the default
+            GitHub HTTPS URL for the ``owner/name`` id.
+
+        Args:
+            repo: The ``owner/name`` repo id.
+
+        Returns:
+            The override string when configured, else ``"https://github.com/<repo>.git"``.
+        """
+        return self._settings.repo_urls.get(repo) or f"https://github.com/{repo}.git"
+
+    def _clone_or_fetch(
+        self, ctx, repo: str, errors: list[str]
+    ) -> Path | None:
+        """Clone ``repo`` into the sandbox on first sight, else fetch it.
+
+        Purpose:
+            Ensure a full local clone exists under :func:`clone_dir` and is current with the
+            remote: when the directory is absent (or not a git repo) it is cloned from
+            :meth:`_repo_url`; otherwise it is fetched (with ``--prune``). A PAT, if present
+            in the environment at run time, is injected as git-auth env (never argv); public
+            repos and local fixture URLs need none.
+
+        Args:
+            ctx: The shared :class:`~agentic_scripts.workflows.base.WorkContext`.
+            repo: The ``owner/name`` repo id.
+            errors: The run's business-error list; a clone/fetch failure appends one
+                repo-level error string here (so the caller can continue to the next repo).
+
+        Returns:
+            The clone :class:`Path` on success, or None on a :class:`GitError` (logged with
+            the stderr tail and recorded in ``errors``) — a repo failure never stops other
+            repos.
+
+        Side Effects:
+            ``mkdir -p`` of the clone's parent; one ``git clone`` or ``git fetch`` per call.
+        """
+        path = clone_dir(ctx.sandbox_dir, repo)
+        env = clone_env_for(os.environ.get("GITHUB_PAT", "").strip() or None)
+        try:
+            if not (path.exists() and self._git.is_repo(path)):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._git.clone(self._repo_url(repo), path, env=env)
+            else:
+                self._git.fetch(path, env=env)  # prune by default
+        except GitError as exc:
+            ctx.logger.error("oc-todo: clone/fetch failed for %s: %s", repo, exc)
+            errors.append(f"clone/fetch failed for {repo}: {exc}")
+            return None
+        return path
+
+    def _scan_repo(self, ctx, repo: str, clone: Path) -> list[Todo]:
+        """Scan every remote branch of ``clone`` for ``OC-todo:`` markers.
+
+        Purpose:
+            The local full-clone scan model: for each remote branch (short name), grep the
+            committed ref ``origin/<branch>`` for :data:`MARKER_PREFIX`, parse the matches
+            into :class:`Todo` objects, and — per todo — read the file at that ref to decide
+            whether a keep-instruction applies (the marker line plus the next
+            :data:`KEEP_CONTEXT_LINES` lines).
+
+        Args:
+            ctx: The shared :class:`~agentic_scripts.workflows.base.WorkContext`.
+            repo: The ``owner/name`` repo id (stored on each :class:`Todo`).
+            clone: The full-clone directory to scan.
+
+        Returns:
+            A deterministically sorted (by ``(branch, file, line)``) list of :class:`Todo`
+            with :attr:`Todo.keep` set from file context; empty when no branch carries a
+            marker.
+
+        Side Effects:
+            Read-only git calls (:meth:`Git.branches`, :meth:`Git.grep_fixed`,
+            :meth:`Git.show_file`). A :class:`GitError` mid-branch (e.g. a vanished ref) is
+            logged and that branch skipped — the scan continues.
+        """
+        todos: list[Todo] = []
+        # Skip non-source branches: HEAD/origin (local-clone symref artifacts) and the
+        # workflow's own oc-todo/* fix branches (scanning them would re-detect the same
+        # marker on a branch that already carries it — including an orphan resume).
+        branch_list = [
+            b
+            for b in self._git.branches(clone)
+            if b not in ("HEAD", "origin") and not b.startswith("oc-todo/")
+        ]
+        for branch in branch_list:
+            ref = f"origin/{branch}"
+            try:
+                lines = self._git.grep_fixed(clone, ref, MARKER_PREFIX)
+            except GitError as exc:
+                ctx.logger.warning(
+                    "oc-todo: grep failed on %s@%s — skipping branch: %s", repo, ref, exc
+                )
+                continue
+            for todo in parse_grep_lines(repo, branch, ref, lines):
+                todos.append(self._with_keep(ctx, clone, ref, todo))
+        todos.sort(key=lambda t: (t.branch, t.file, t.line))
+        return todos
+
+    def _with_keep(self, ctx, clone: Path, ref: str, todo: Todo) -> Todo:
+        """Return ``todo`` with :attr:`Todo.keep` set from the file context at ``ref``.
+
+        Purpose:
+            Read the marker's file at ``ref`` and check the keep-instruction window (the
+            marker line plus the next :data:`KEEP_CONTEXT_LINES` lines) for an
+            ``oc-original`` note; a missing/unreadable file is treated as no-keep (logged).
+
+        Args:
+            ctx: The shared context (for logging).
+            clone: The full-clone directory to read from.
+            ref: The committed ref the marker was found on (e.g. ``"origin/dev"``).
+            todo: The parsed :class:`Todo` (its :attr:`Todo.keep` is False at parse time).
+
+        Returns:
+            A copy of ``todo`` with :attr:`Todo.keep` set (the dataclass is frozen, so this
+            uses :func:`dataclasses.replace`).
+        """
+        try:
+            text = self._git.show_file(clone, ref, todo.file)
+        except GitError as exc:
+            ctx.logger.warning("oc-todo: cannot read %s@%s for keep check — assuming no-keep: %s",
+                               todo.file, ref, exc)
+            return replace(todo, keep=False)
+        lines = text.splitlines()
+        start = max(0, todo.line - 1)
+        context = lines[start : start + KEEP_CONTEXT_LINES + 1]
+        return replace(todo, keep=has_keep_instruction(context))
+
+    def _lookup_pr(self, owner: str, name: str, branch_name: str) -> dict | None | str:
+        """Look up the PR whose head is ``owner:branch_name`` — at most ONE API call.
+
+        Purpose:
+            The single idempotency query for one todo. Every PR-state consumption (the
+            :func:`plan_run` classifier and the pipeline) goes through this so a todo costs
+            at most one ``find_pr_by_head`` per run; the caller caches the result in
+            ``pr_cache`` and passes it back to :meth:`_process_todo`.
+
+        Args:
+            owner: The repo owner (the head ref's left side).
+            name: The repo name.
+            branch_name: The todo's ``oc-todo/<id>`` branch name.
+
+        Returns:
+            The raw PR dict when one exists, ``None`` when no PR has that head, or the string
+            ``"api_error"`` on a :class:`GitHubError` (logged WARNING; guardrail: an unknown
+            state is treated as "skip, never re-create").
+        """
+        try:
+            return self._github.find_pr_by_head(owner, name, branch_name)
+        except GitHubError as exc:
+            logging.getLogger("agentic_scripts.oc_todo").warning(
+                "oc-todo: PR lookup failed for %s:%s — guardrail (skip, never re-create): %s",
+                owner, branch_name, exc,
+            )
+            return "api_error"
+
+    def _process_todo(
+        self,
+        ctx,
+        todo: Todo,
+        test_cmd: str | None,
+        clone: Path,
+        cached_lookup: dict | None | str | object = _NOT_LOOKED_UP,
+    ) -> dict:
+        """Run one todo's full pipeline and return its outcome.
+
+        Purpose:
+            Take a single :class:`Todo` from scan to (attempted) PR: check for an existing
+            PR (skip / resolve / retry), resume an orphan branch if the fix was already
+            pushed, otherwise set up a fresh worktree, invoke the ``oc-todo-resolver`` agent,
+            gate on its report, then commit, push, and open the PR. The worktree is always
+            cleaned up (try/finally).
+
+        Args:
+            ctx: The shared :class:`~agentic_scripts.workflows.base.WorkContext`.
+            todo: The :class:`Todo` to resolve (marker verbatim, file/line hint, branch, keep).
+            test_cmd: The configured per-repo test command, or None.
+            clone: The full-clone directory the worktree is created in and pushed from.
+            cached_lookup: A PR dict / ``None`` / ``"api_error"`` already looked up by the
+                caller (the classifier's lookup for a ``pr_open`` todo), or the
+                :data:`_NOT_LOOKED_UP` sentinel to do one here — so each todo costs at most
+                ONE API call per run.
+
+        Returns:
+            An outcome dict ``{"status", "reason", "pr_number", "pr_url", "commit_sha"}``
+            where ``status`` is one of ``"pr_created"``, ``"skipped"``, ``"resolved"``, or
+            ``"failed"``. Business failures are returned (never raised).
+
+        Side Effects:
+            At most one :meth:`Git.worktree_add`/``worktree_remove`` pair, at most one agent
+            invocation, at most one push of a fresh ``oc-todo/<id>`` branch, and at most one
+            PR creation. The worktree is removed in a ``finally`` (best-effort).
+        """
+        owner, name = todo.repo.split("/", 1)
+        branch_name = todo.branch_name
+
+        # --- Step 1: existing-PR check (at most ONE API call per run). --- #
+        lookup = cached_lookup if cached_lookup is not _NOT_LOOKED_UP else self._lookup_pr(
+            owner, name, branch_name
+        )
+        if isinstance(lookup, dict):
+            if lookup.get("merged") is True:
+                return self._outcome("resolved", "PR merged — todo resolved", None,
+                                     lookup.get("html_url"), None)
+            if lookup.get("state") == "open":
+                return self._outcome(
+                    "skipped", f"PR already open #{lookup.get('number')}",
+                    lookup.get("number"), lookup.get("html_url"), None,
+                )
+            # closed (unmerged) → fall through and retry.
+        elif lookup == "api_error":
+            return self._outcome(
+                "skipped", "PR state unknown (API error) — guardrail: no re-creation",
+                None, None, None,
+            )
+        # lookup is None (no PR) → fresh attempt or orphan resume below.
+
+        # --- Step 2: orphan-branch resume (pushed branch, no PR). --- #
+        try:
+            commit_sha = self._git.rev_parse(clone, f"origin/{branch_name}")
+        except GitError:
+            commit_sha = None
+        if commit_sha is not None:
+            body_note = (
+                "\n\n(Branch reused from a previous run — the agent's committed fix was "
+                "already pushed; no agent re-run.)"
+            )
+            sections: dict = {}
+            try:
+                number, url = self._github.create_pr(
+                    owner, name, title=render_pr_title(todo.marker),
+                    body=render_pr_body(todo, todo.repo, sections, ctx.run_id) + body_note,
+                    head=f"{todo.repo}:{branch_name}", base=todo.branch,
+                )
+            except GitHubError as exc:
+                return self._outcome("failed", f"create_pr failed: {exc}", None, None, commit_sha)
+            return self._outcome("pr_created", "resumed orphan branch (no agent re-run)",
+                                 number, url, commit_sha)
+
+        # --- Steps 3–8 wrapped so the worktree is ALWAYS cleaned up. --- #
+        wt = worktree_dir(ctx.sandbox_dir, todo.repo, todo.id)
+        try:
+            # Step 3: fresh attempt — drop a stale local branch, clean any leaked worktree.
+            try:
+                self._git.rev_parse(clone, branch_name)
+                self._git.delete_branch(clone, branch_name)  # stale from a prior attempt
+            except GitError:
+                pass  # no local branch (the normal case) — nothing to delete
+            if wt.exists():
+                self._best_effort_remove_worktree(ctx, clone, wt)
+            self._git.worktree_add(clone, wt, branch_name, f"origin/{todo.branch}")
+
+            # Step 4: agent invocation.
+            runner = self._runner_override or ctx.runner
+            brief = render_brief(ctx.run_id, todo, test_cmd)
+            res = runner.run(
+                agent="oc-todo-resolver", brief=brief, work_dir=wt,
+                title=f"oc-todo {todo.id} ({ctx.run_id})",
+            )
+
+            # Step 5: agent gate.
+            if res.status in {"error", "timeout"}:
+                return self._outcome("failed", f"agent {res.status}: {res.error or res.status}",
+                                     None, None, None)
+            if res.status == "ok" and _is_step_exhausted(res.final_text):
+                return self._outcome(
+                    "failed", "agent hit its step cap — no complete fix", None, None, None
+                )
+            sections = extract_report_sections(res.final_text)
+            blockers = sections["blockers"].strip().lower()
+            if blockers not in ("", "none"):
+                return self._outcome(
+                    "failed", f"agent reported blockers: {sections['blockers'][:200]}",
+                    None, None, None,
+                )
+
+            # Step 6: commit (the idempotency primitive — False when the agent changed nothing).
+            self._git.add(wt)
+            created = self._git.commit(wt, render_pr_title(todo.marker))
+            if created is False:
+                return self._outcome("failed", "agent made no changes — nothing to commit",
+                                     None, None, None)
+            commit_sha = self._git.rev_parse(wt, "HEAD")
+
+            # Step 7: push the fresh branch (never a protected/pre-existing one).
+            try:
+                self._git.push(wt, branch_name, upstream=True)
+            except GitError as exc:
+                return self._outcome("failed", f"push failed: {exc}", None, None, commit_sha)
+
+            # Step 8: open the PR.
+            number, url = self._github.create_pr(
+                owner, name, title=render_pr_title(todo.marker),
+                body=render_pr_body(todo, todo.repo, sections, ctx.run_id),
+                head=f"{todo.repo}:{branch_name}", base=todo.branch,
+            )
+            return self._outcome("pr_created", "PR created from fresh worktree", number, url,
+                                 commit_sha)
+        except GitError as exc:
+            return self._outcome("failed", f"git failure: {exc}", None, None, None)
+        finally:
+            # Step 9: cleanup (ALWAYS) — a leaked worktree is loud, not fatal.
+            self._best_effort_remove_worktree(ctx, clone, wt)
+
+    def _best_effort_remove_worktree(self, ctx, clone: Path, wt: Path) -> None:
+        """Remove ``wt`` from ``clone`` best-effort (never raises).
+
+        Purpose:
+            The pipeline's cleanup primitive: remove the per-todo worktree and, on failure,
+            fall back to a prune + ``rmtree`` so a leaked directory never bricks the next
+            attempt. Each step is wrapped — a :class:`GitError` is logged (WARNING) and the
+            remaining fallbacks still run.
+
+        Args:
+            ctx: The shared context (for logging).
+            clone: The full-clone repository the worktree is registered in.
+            wt: The worktree directory to remove (may already be gone).
+        """
+        if not wt.exists():
+            return
+        try:
+            self._git.worktree_remove(clone, wt, force=True)
+        except GitError as exc:
+            ctx.logger.warning("oc-todo: worktree_remove failed for %s — falling back: %s", wt, exc)
+            self._prune_best_effort(ctx, clone)
+            shutil.rmtree(wt, ignore_errors=True)
+        # Remove the now-empty per-repo parent dir so no worktree dirs remain under
+        # <sandbox>/wt (a leftover empty dir would be noise in the sandbox).
+        parent = wt.parent
+        try:
+            if parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass  # a non-empty or vanished parent is harmless — leave it
+
+    def _prune_best_effort(self, ctx, clone: Path) -> None:
+        """Run ``git worktree prune`` best-effort (a failure is logged, never raised)."""
+        try:
+            self._git.prune_worktrees(clone)
+        except GitError as exc:
+            ctx.logger.warning("oc-todo: worktree prune failed for %s: %s", clone, exc)
+
+    @staticmethod
+    def _outcome(status: str, reason: str, pr_number, pr_url, commit_sha) -> dict:
+        """Build a :meth:`_process_todo` outcome dict (a small shared helper)."""
+        return {
+            "status": status,
+            "reason": reason,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "commit_sha": commit_sha,
+        }
+
+    # --- Run orchestration --------------------------------------------------- #
+
+    def run(self, ctx) -> WorkflowResult:
+        """Perform one complete, idempotent oc-todo run and report its outcome.
+
+        Purpose:
+            Wire the core into a full run over every configured repo (config order,
+            sequential): clone-or-fetch → per-branch scan → PR-state lookups for the
+            ``pr_open`` subset → :func:`plan_run` classification → per-todo pipeline (capped)
+            → vanished-entry resolution → a single atomic state persist.
+
+        Idempotency contract:
+            State is consulted BEFORE acting; a re-run never duplicates a PR. A ``pr_open``
+            todo whose PR is still open is skipped, one whose PR merged is resolved, and one
+            whose PR failed/vanished is re-processed. Merged+removed or manually-deleted
+            markers resolve their recorded entries.
+
+        Failure contract:
+            Per-todo failures become ``failed`` state (retryable next gate-open run) AND a
+            business error in the result; repo-level clone/fetch failures are logged and the
+            other repos continue; the run returns ``status="error"`` only when at least one
+            business error accumulated. Unexpected exceptions map to ``status="error"``.
+
+        Args:
+            ctx: The shared :class:`~agentic_scripts.workflows.base.WorkContext`.
+
+        Returns:
+            A :class:`WorkflowResult` (``items_found`` = total current markers across all
+            repos; ``actions`` the side-effect notes; ``errors`` the business failures).
+
+        Side Effects:
+            Clones/fetches into the sandbox, one PR per processed todo on a fresh branch, and
+            (only when the state document changed) one atomic :meth:`StateStore.save`.
+        """
+        try:
+            return self._run(ctx)
+        except Exception as exc:  # noqa: BLE001 - map unexpected exceptions to a business error
+            ctx.logger.error("oc-todo run failed unexpectedly: %s", exc)
+            return WorkflowResult(
+                status="error", errors=[f"unexpected error during oc-todo run: {exc}"]
+            )
+
+    def _run(self, ctx) -> WorkflowResult:
+        """The unwrapped run body (called by :meth:`run`, which maps exceptions)."""
+        actions_out: list[str] = []
+        errors: list[str] = []
+
+        # --- 1. No repos configured → no-op (no state write). --- #
+        if not self._settings.repos:
+            return WorkflowResult(
+                status="ok", items_found=0, actions=["no repos configured — nothing to scan"]
+            )
+
+        # --- 2. Load + validate state. --- #
+        st = ctx.state.load(_STATE_KEY)
+        err = validate_state(st)
+        if err is not None:
+            return WorkflowResult(status="error", errors=[err])
+        if st == {}:
+            st = fresh_state()
+
+        todos_map: dict[str, dict] = st.setdefault("todos", {})
+        loaded_snapshot = json.dumps(st, sort_keys=True)
+        items_found = 0
+
+        # --- 3. Per repo (config order), sequential. A repo failure never stops others. --- #
+        for repo in self._settings.repos:
+            clone = self._clone_or_fetch(ctx, repo, errors)
+            if clone is None:
+                continue  # repo-level error already recorded; continue to the next repo
+
+            current = self._scan_repo(ctx, repo, clone)
+            items_found += len(current)
+            ctx.logger.info(
+                "oc-todo: %s — found %d marker(s)", repo, len(current),
+            )
+
+            # 3c. PR-state lookups for the pr_open subset (one API call each).
+            pr_cache: dict[str, dict | None | str] = {}
+            pr_states: dict[str, str | None] = {}
+            for todo in current:
+                entry = todos_map.get(todo.id)
+                if isinstance(entry, dict) and entry.get("status") == "pr_open":
+                    lookup = self._lookup_pr(*todo.repo.split("/", 1), todo.branch_name)
+                    pr_cache[todo.id] = lookup
+                    if isinstance(lookup, dict):
+                        pr_states[todo.id] = pr_state_from_api(lookup)
+                    elif lookup is None:
+                        pr_states[todo.id] = "missing"
+                    else:  # "api_error"
+                        pr_states[todo.id] = None
+
+            actions = plan_run(current, st, pr_states)
+            process_queue = [a["todo"] for a in actions if a["action"] == "process"]
+            to_process, not_processed = apply_cap(process_queue, self._settings.max_todos_per_repo)
+            test_cmd = self._settings.test_commands.get(repo)
+
+            # 3d. Process the capped queue in order; route outcome notes per spec.
+            for todo in to_process:
+                old_entry = todos_map.get(todo.id)
+                old_attempts = (
+                    int(old_entry.get("attempts", 0)) if isinstance(old_entry, dict) else 0
+                )
+                outcome = self._process_todo(
+                    ctx, todo, test_cmd, clone,
+                    cached_lookup=pr_cache.get(todo.id, _NOT_LOOKED_UP),
+                )
+                self._apply_outcome(
+                    ctx, repo, todo, old_attempts, outcome, todos_map, actions_out, errors
+                )
+
+            # 3e. Skip / resolve actions (state unchanged for skip; resolved for resolve).
+            for action in actions:
+                kind = action["action"]
+                if kind == "skip":
+                    t = action["todo"]
+                    reason = action.get("reason", "PR already open")
+                    actions_out.append(f"skipped {t.repo} ({t.file}:{t.line}): {reason}")
+                elif kind == "resolve" and "entry_id" not in action:
+                    todo = action["todo"]
+                    todos_map[todo.id] = make_entry(todo, "resolved", last_run_id=ctx.run_id)
+                    actions_out.append(
+                        f"resolved {todo.repo} ({todo.file}:{todo.line}): PR merged — resolved"
+                    )
+
+            # 3f. Vanished entries (recorded but no longer in the scan) → resolved.
+            for action in actions:
+                if action["action"] == "resolve" and "entry_id" in action:
+                    tid = action["entry_id"]
+                    todos_map[tid] = make_entry(
+                        Todo(repo=(action.get("entry") or {}).get("repo", repo),
+                             branch=(action.get("entry") or {}).get("branch", ""),
+                             file=(action.get("entry") or {}).get("file", "?"),
+                             line=int((action.get("entry") or {}).get("line", 0)),
+                             marker=(action.get("entry") or {}).get("marker", "")),
+                        "resolved", last_run_id=ctx.run_id,
+                    )
+                    actions_out.append(
+                        f"resolved {repo} (recorded entry {tid}): marker no longer present"
+                    )
+
+            if not_processed:
+                actions_out.append(
+                    f"{len(not_processed)} todo(s) not processed this run "
+                    f"(cap {self._settings.max_todos_per_repo})"
+                )
+
+        # --- 4. Single atomic state save, only when the document changed. --- #
+        if json.dumps(st, sort_keys=True) != loaded_snapshot:
+            ctx.state.save(_STATE_KEY, st)
+
+        return WorkflowResult(
+            status="error" if errors else "ok",
+            items_found=items_found,
+            actions=actions_out,
+            errors=errors,
+        )
+
+    def _apply_outcome(
+        self, ctx, repo: str, todo: Todo, old_attempts: int, outcome: dict,
+        todos_map: dict[str, dict], actions_out: list[str], errors: list[str],
+    ) -> None:
+        """Apply one :meth:`_process_todo` outcome to the in-memory state + result lists.
+
+        Purpose:
+            The spec's outcome routing: ``pr_created``/``skipped``/``resolved`` append a note
+            to ``actions_out`` (and update the state entry for ``pr_created``/``resolved``);
+            ``failed`` appends a business error to ``errors`` AND sets the state entry to
+            ``failed`` (retryable next run).
+
+        Args:
+            ctx: The shared context (for logging + ``run_id``).
+            repo: The ``owner/name`` repo id.
+            todo: The :class:`Todo` this outcome is for.
+            old_attempts: The entry's prior attempt count (0 when absent) — incremented on a
+                new attempt (``pr_created`` / ``failed``).
+            outcome: The dict returned by :meth:`_process_todo`.
+            todos_map: The state document's ``"todos"`` mapping (mutated in place).
+            actions_out: The run's side-effect note list (appended to).
+            errors: The run's business-error list (appended to on failure).
+        """
+        status = outcome["status"]
+        if status == "pr_created":
+            todos_map[todo.id] = make_entry(
+                todo, "pr_open", pr_number=outcome["pr_number"], pr_url=outcome["pr_url"],
+                commit_sha=outcome["commit_sha"], attempts=old_attempts + 1, last_run_id=ctx.run_id,
+            )
+            actions_out.append(
+                f"PR #{outcome['pr_number']} for {repo} ({todo.file}:{todo.line})"
+            )
+        elif status == "skipped":
+            actions_out.append(
+                f"skipped {repo} ({todo.file}:{todo.line}): {outcome['reason']}"
+            )
+        elif status == "resolved":
+            todos_map[todo.id] = make_entry(todo, "resolved", last_run_id=ctx.run_id)
+            actions_out.append(f"resolved {repo} ({todo.file}:{todo.line}): {outcome['reason']}")
+        else:  # failed — a business error AND retryable state
+            todos_map[todo.id] = make_entry(
+                todo, "failed", last_error=outcome["reason"], attempts=old_attempts + 1,
+                last_run_id=ctx.run_id,
+            )
+            errors.append(f"{repo} ({todo.file}:{todo.line}): {outcome['reason']}")
+            ctx.logger.warning(
+                "oc-todo: %s (%s:%d) failed: %s", repo, todo.file, todo.line, outcome["reason"]
+            )

@@ -460,3 +460,32 @@ class Git:
             timeout=self._TIMEOUT_LOCAL,
         )
         self._check("delete_branch", proc)
+
+    def prune_worktrees(self, repo: Path) -> None:
+        """Deregister worktree entries whose directories no longer exist.
+
+        Purpose:
+            Run ``git -C <repo> worktree prune`` to drop the bookkeeping for any worktree
+            whose directory was removed out from under git (e.g. a crash between
+            :meth:`worktree_add` and :meth:`worktree_remove`, or an operator deleting the
+            sandbox). This is the crash-recovery step: a stale entry would otherwise make
+            a later ``worktree add`` of the same path fail with "already exists".
+
+        Rationale:
+            A local, bounded operation (no network), so it uses :attr:`_TIMEOUT_LOCAL`. It
+            is idempotent — pruning when there is nothing to prune succeeds silently — so
+            callers may invoke it best-effort after a failed :meth:`worktree_remove`.
+
+        Args:
+            repo: A path inside the main repository (the worktrees are registered here).
+
+        Raises:
+            GitError: On any failure (e.g. ``repo`` is not a repository) — the message
+                carries git's stderr tail.
+        """
+        proc = self._run(
+            "prune_worktrees",
+            ["git", "-C", str(repo), "worktree", "prune"],
+            timeout=self._TIMEOUT_LOCAL,
+        )
+        self._check("prune_worktrees", proc)

@@ -286,9 +286,17 @@ def test_render_brief_exact_format() -> None:
 
 
 def test_render_pr_title_strip_collapse_truncate() -> None:
-    """render_pr_title strips the prefix, collapses whitespace, and cuts at 72 chars."""
+    """render_pr_title strips the decoration + prefix, collapses whitespace, cuts at 72."""
     # Prefix stripped + leading/trailing whitespace collapsed.
     assert render_pr_title(f"{MARKER_PREFIX}   fix   the thing  ") == "OC: fix the thing"
+
+    # A comment-decorated marker (the typical shape) strips the decoration first.
+    assert render_pr_title(f"# {MARKER_PREFIX} fix bug A") == "OC: fix bug A"
+    # Other comment decorations are stripped too (% with no space, //).
+    assert render_pr_title(f"%{MARKER_PREFIX} do x") == "OC: do x"
+    assert render_pr_title(f"// {MARKER_PREFIX} do y") == "OC: do y"
+    # A bare (undecorated) marker still works.
+    assert render_pr_title(f"{MARKER_PREFIX} fix") == "OC: fix"
 
     # A 200-char marker body is truncated to exactly 72 chars after the "OC: " prefix.
     long_body = "x" * 200
@@ -296,6 +304,10 @@ def test_render_pr_title_strip_collapse_truncate() -> None:
     assert title.startswith("OC: ")
     assert len(title) == len("OC: ") + 72
     assert title == "OC: " + ("x" * 72)
+
+    # A decorated 200-char marker still truncates at 72 (decoration stripped first).
+    decorated = render_pr_title(f"# {MARKER_PREFIX} {long_body}")
+    assert len(decorated) == len("OC: ") + 72
 
 
 def test_extract_report_sections_full_and_missing() -> None:
