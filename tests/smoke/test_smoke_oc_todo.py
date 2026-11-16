@@ -80,20 +80,26 @@ def _workspace(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
     dirs = {name: tmp_path / name for name in ("state", "logs", "sandbox")}
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
-    # Task 5 (additive): with mail-keeper enabled in the shipped config, a forced run would
-    # drive the LIVE mail-keeper (real notmuch index + real agent). Point MAIL_INDEX_DB at a
-    # nonexistent tmp path so the workflow returns `skipped` (index missing) — no canary walk,
-    # no agent — and MAIL_PROCESSED_LOG at a tmp path so the production log is never probed.
-    os.environ["MAIL_INDEX_DB"] = str(tmp_path / "no-such-index")
-    os.environ["MAIL_PROCESSED_LOG"] = str(tmp_path / "no-such-log.jsonl")
+    # MAIL_* env isolation now lives in the autouse _isolate_mail_env fixture below — it points
+    # both vars at nonexistent per-test tmp paths so mail-keeper returns `skipped` (no live agent).
     cfg = _write_config(tmp_path, dirs["state"], dirs["logs"], dirs["sandbox"])
     return cfg, dirs
 
 
 @pytest.fixture(autouse=True)
-def _isolate_mail_env():
-    """Point MAIL_* env at tmp paths and restore the originals after each test."""
+def _isolate_mail_env(tmp_path: Path):
+    """Point MAIL_* env at nonexistent per-test tmp paths and restore the originals after.
+
+    The shipped config has ``mail-keeper`` enabled, so a forced in-process ``run()`` would
+    otherwise drive the LIVE mail-keeper (real notmuch index + real agent). Pointing
+    ``MAIL_INDEX_DB`` at a nonexistent tmp path makes the workflow return ``skipped`` (index
+    missing) — no canary walk, no agent — and ``MAIL_PROCESSED_LOG`` at a tmp path keeps the
+    production log from being probed. The originals are restored after each test (popped when
+    they were unset).
+    """
     saved = {k: os.environ.get(k) for k in ("MAIL_INDEX_DB", "MAIL_PROCESSED_LOG")}
+    os.environ["MAIL_INDEX_DB"] = str(tmp_path / "no-such-index")
+    os.environ["MAIL_PROCESSED_LOG"] = str(tmp_path / "no-such-log.jsonl")
     yield
     for k, v in saved.items():
         if v is None:
@@ -198,6 +204,9 @@ def test_smoke_oc_todo_empty_repo_list_no_agent(tmp_path: Path) -> None:
     log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
     # The workflow returns before any runner access: ok with 0 items and exactly one action.
     assert "WORKFLOW oc-todo status=ok items_found=0 actions=1 errors=0" in log_text
+    # Pins the env isolation: mail-keeper must skip (nonexistent index) — without this the test
+    # would dispatch a LIVE agent over the real notmuch index and hang for hours.
+    assert "WORKFLOW mail-keeper status=skipped" in log_text
     # Proven by the absence of any sandbox dir + state (the agent is never reached).
     assert not (dirs["sandbox"] / "oc-todo").exists()
     assert not (dirs["state"] / "oc-todo.json").exists()

@@ -70,21 +70,26 @@ def _workspace(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
     dirs = {name: tmp_path / name for name in ("state", "logs", "sandbox")}
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
-    # Task 3b (additive): with mail-keeper enabled in the shipped config, a forced run
-    # with fresh state would start a LIVE BACKFILL (real agent over real history). Point
-    # MAIL_INDEX_DB at a nonexistent tmp path so the workflow returns `skipped` (index
-    # missing) — no canary walk, no agent — and MAIL_PROCESSED_LOG at a tmp path so the
-    # production log is never probed. The autouse fixture below restores both after each test.
-    os.environ["MAIL_INDEX_DB"] = str(tmp_path / "no-such-index")
-    os.environ["MAIL_PROCESSED_LOG"] = str(tmp_path / "no-such-log.jsonl")
+    # MAIL_* env isolation now lives in the autouse _isolate_mail_env fixture below — it points
+    # both vars at nonexistent per-test tmp paths so mail-keeper returns `skipped` (no live agent).
     cfg = _write_config(tmp_path, dirs["state"], dirs["logs"], dirs["sandbox"])
     return cfg, dirs
 
 
 @pytest.fixture(autouse=True)
-def _isolate_mail_env():
-    """Point MAIL_* env at tmp paths and restore the originals after each test."""
+def _isolate_mail_env(tmp_path: Path):
+    """Point MAIL_* env at nonexistent per-test tmp paths and restore the originals after.
+
+    The shipped config has ``mail-keeper`` enabled, so a forced in-process ``run()`` would
+    otherwise drive the LIVE mail-keeper (real notmuch index + real agent). Pointing
+    ``MAIL_INDEX_DB`` at a nonexistent tmp path makes the workflow return ``skipped`` (index
+    missing) — no canary walk, no agent — and ``MAIL_PROCESSED_LOG`` at a tmp path keeps the
+    production log from being probed. The originals are restored after each test (popped when
+    they were unset).
+    """
     saved = {k: os.environ.get(k) for k in ("MAIL_INDEX_DB", "MAIL_PROCESSED_LOG")}
+    os.environ["MAIL_INDEX_DB"] = str(tmp_path / "no-such-index")
+    os.environ["MAIL_PROCESSED_LOG"] = str(tmp_path / "no-such-log.jsonl")
     yield
     for k, v in saved.items():
         if v is None:
