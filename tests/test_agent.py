@@ -91,7 +91,7 @@ def config(shim: Path) -> Config:
     )
     agent = Agent(
         binary=str(shim),
-        model="openaiCompatible/Qwen3.8-27B",
+        model="llama-cpp/Qwen3.8-27B",
         max_steps=40,
         timeout_minutes=1,
         auto_approve=True,

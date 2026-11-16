@@ -302,6 +302,66 @@ def test_registry_extensibility_and_concurrency(tmp_path: Path) -> None:
     assert text.index("WORKFLOW noop") < text.index("WORKFLOW slow_wf")
 
 
+BAD_WF_SOURCE = '''
+"""A failing test workflow used to exercise per-workflow error logging."""
+from agentic_scripts.workflows.base import WorkflowResult
+
+
+class BadWorkflow:
+    """A workflow that reports a business failure (never raises)."""
+
+    name = "bad_wf"
+
+    def run(self, ctx):
+        return WorkflowResult(status="error", errors=["agent run error: boom (duration 4s)"])
+
+
+def create(config):
+    """Return a :class:`BadWorkflow` instance (required workflow entry point)."""
+    return BadWorkflow()
+'''
+
+
+def test_workflow_error_text_logged(tmp_path: Path) -> None:
+    """A failing workflow's error text appears in the run log at ERROR level.
+
+    Follows the file's fake-workflow pattern: a tmp package module whose ``run`` returns
+    ``status="error"`` with an error string. The canonical INFO summary line stays intact,
+    and each ``result.errors`` entry is additionally logged at ERROR level.
+    """
+    dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
+    for d in dirs.values():
+        d.mkdir(parents=True)
+
+    pkg = tmp_path / "test_bad_pkg"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "bad_wf.py").write_text(BAD_WF_SOURCE, encoding="utf-8")
+
+    workflows = {
+        "bad_wf": {"enabled": True, "module": "test_bad_pkg.bad_wf", "agent": None},
+    }
+    cfg = _write_config(tmp_path, **_dir_kwargs(dirs), workflows=workflows)
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        code = run(
+            ["run", "--force", "--config", str(cfg)],
+            now=datetime(2026, 10, 20, 23, 0),
+            load=(0.5, 0.5, 0.5),
+            run_id="bad-wf-run",
+        )
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    assert code == 0
+    log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
+    # The canonical INFO summary line is unchanged (errors=1 counted as before).
+    assert "WORKFLOW bad_wf status=error" in log_text
+    # The new additive ERROR-level line carries the actual error text.
+    assert "WORKFLOW bad_wf error: agent run error: boom (duration 4s)" in log_text
+
+
 def test_kill_mid_run_no_torn_state(tmp_path: Path) -> None:
     """6. Kill -9 mid-run → process gone; any state file is valid JSON; re-run succeeds."""
     dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}

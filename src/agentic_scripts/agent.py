@@ -130,7 +130,7 @@ class AgentRunner:
         Example:
             >>> runner.build_command(agent="noop", brief="hi", work_dir=Path("/tmp/x"))
             ['opencode', 'run', '--agent', 'noop', '--format', 'json', '--dir', '/tmp/x',
-             '--auto', '--model', 'openaiCompatible/Qwen3.8-27B', 'hi']
+              '--auto', '--model', 'llama-cpp/Qwen3.8-27B', 'hi']
         """
         cfg = self._config.agent
         cmd: list[str] = [

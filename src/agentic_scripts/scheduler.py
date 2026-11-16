@@ -549,6 +549,8 @@ def run(
 
             if result.status == "error":
                 error_count += 1
+            for err in result.errors:
+                logger.error("WORKFLOW %s error: %s", entry.name, err)
             logger.info(
                 "WORKFLOW %s status=%s items_found=%d actions=%d errors=%d duration=%.2fs",
                 entry.name,
