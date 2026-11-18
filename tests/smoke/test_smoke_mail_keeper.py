@@ -14,7 +14,7 @@ references any of those live paths (acceptance #6 — verified by grep). All fil
 of the fixture maildir uses Python ``os.walk`` (GNU ``find`` is forbidden for this maildir).
 
 The fake agent is a standalone executable Python 3 script written by the test (no third-party
-imports). It parses argv (``--dir``, ``--title``, the final positional brief), performs the
+imports). It takes the vault from ``PWD``/cwd and parses argv (``--title``, the brief), performs the
 deterministic vault edits + git commit/push, and emits an NDJSON event stream whose final
 ``text`` event carries the result report with the EXACT Triage table that Task 3's
 ``_parse_triage_classes`` parses. The brief format is the contract: the shim's manifest-line
@@ -198,7 +198,8 @@ A brand-new message arriving after the backfill.
 SHIM_SOURCE = r'''#!/usr/bin/env python3
 """Deterministic fake ``opencode`` shim for the mail-keeper smoke test.
 
-Parses argv (--dir, --title, final positional brief), performs the agent's contract
+Derives the vault from PWD/cwd (OpenCode 2.x has no directory flag), parses argv
+(--title, final positional brief), performs the agent's contract
 (provenance-tagged vault edits + todo line + draft + OC: commit + push), and emits an NDJSON
 event stream whose final text event is the result report with the Triage table. No
 third-party imports; stdlib only. Writes its captured brief as its first act so failure-mode
@@ -250,14 +251,7 @@ def _append_under(section_header: str, line: str, path: Path) -> None:
 def main() -> int:
     argv = sys.argv[1:]
 
-    def _flag(name: str) -> str | None:
-        if name in argv:
-            i = argv.index(name)
-            if i + 1 < len(argv):
-                return argv[i + 1]
-        return None
-
-    vault = _flag("--dir") or os.getcwd()
+    vault = os.environ.get("PWD") or os.getcwd()  # 2.x: dir = PWD ?? cwd
     # The brief is the LAST positional argument (after any --title value).
     brief = argv[-1]
 
@@ -389,11 +383,7 @@ from datetime import UTC, datetime
 
 def main() -> int:
     argv = sys.argv[1:]
-    if "--dir" in argv:
-        i = argv.index("--dir")
-        vault = argv[i + 1] if i + 1 < len(argv) else os.getcwd()
-    else:
-        vault = os.getcwd()
+    vault = os.environ.get("PWD") or os.getcwd()  # 2.x: dir = PWD ?? cwd
     brief = argv[-1]
 
     try:

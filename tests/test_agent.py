@@ -8,6 +8,10 @@ The shim is a Python script written to ``tmp_path`` that records its argv (via e
 - ``notext``: step_start + step_finish only, exit 0
 - ``sleep``: a text event, then sleep(30) (timeout path)
 - ``garbage``: a malformed line before a valid text event
+- ``env``: records cwd, ``PWD`` and stdin state as JSON to ``SHIM_ENV_OUT``, then a text
+- ``v2err``: an OpenCode 2.x error event ``{"error": {"type": "aborted", "message": "x"}}``
+- ``join``: two text events of one message (distinct ``part.id``) — expect a join
+- ``dup``: two text events sharing a ``part.id`` — only the latest text counts
 
 No test in this file can invoke the real ``opencode``: the Config's ``agent.binary``
 is always pointed at the shim. Env vars are set per-test and restored afterwards.
@@ -66,6 +70,35 @@ elif mode == "garbage":
     print("not-json", flush=True)
     emit({"type": "text", "timestamp": 0, "sessionID": "s1", "part": {"text": "after garbage"}})
 
+elif mode == "env":
+    st = os.fstat(0)
+    import stat as _stat
+    info = {
+        "cwd": os.getcwd(),
+        "pwd": os.environ.get("PWD"),
+        "stdin_is_fifo": _stat.S_ISFIFO(st.st_mode),
+        "stdin_read": sys.stdin.read(),
+    }
+    with open(os.environ["SHIM_ENV_OUT"], "w", encoding="utf-8") as fh:
+        json.dump(info, fh)
+    emit({"type": "text", "timestamp": 0, "sessionID": "s1", "part": {"text": "env ok"}})
+elif mode == "v2err":
+    emit({"type": "error", "timestamp": 0, "sessionID": "s1",
+          "error": {"type": "aborted", "message": "x"}})
+elif mode == "join":
+    emit({"type": "text", "timestamp": 0, "sessionID": "s1",
+          "part": {"id": "p0", "messageID": "m0", "text": "older message"}})
+    emit({"type": "text", "timestamp": 1, "sessionID": "s1",
+          "part": {"id": "p1", "messageID": "m1", "text": "Hello, "}})
+    emit({"type": "tool_use", "timestamp": 2, "sessionID": "s1", "part": {"id": "c1"}})
+    emit({"type": "text", "timestamp": 3, "sessionID": "s1",
+          "part": {"id": "p2", "messageID": "m1", "text": "world."}})
+elif mode == "dup":
+    emit({"type": "text", "timestamp": 0, "sessionID": "s1",
+          "part": {"id": "p1", "messageID": "m1", "text": "draft"}})
+    emit({"type": "text", "timestamp": 1, "sessionID": "s1",
+          "part": {"id": "p1", "messageID": "m1", "text": "draft final"}})
+
 sys.exit(int(os.environ.get("SHIM_EXIT", "0")))
 """
 
@@ -106,19 +139,23 @@ def _run(
     mode: str,
     *,
     timeout_seconds: int | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[object, Path]:
     """Run the shim-backed AgentRunner in ``mode``; return (result, argv_file).
 
-    The shim's env vars are set for the duration of the run and restored afterwards.
+    The shim's env vars (plus ``extra_env``) are set for the duration of the run and
+    restored afterwards.
     """
     argv_file = tmp_path / f"argv_{mode}.json"
     work_dir = tmp_path / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     runner = AgentRunner(config=config, logger=logging.getLogger("test.agent"))
 
-    saved = {k: os.environ.get(k) for k in ("SHIM_MODE", "SHIM_ARGV")}
+    extra_env = extra_env or {}
+    saved = {k: os.environ.get(k) for k in ("SHIM_MODE", "SHIM_ARGV", *extra_env)}
     os.environ["SHIM_MODE"] = mode
     os.environ["SHIM_ARGV"] = str(argv_file)
+    os.environ.update(extra_env)
     try:
         result = runner.run(
             agent="fake-agent",
@@ -144,12 +181,11 @@ def test_build_command_exact(config: Config) -> None:
     assert cmd == [
         config.agent.binary,
         "run",
+        "--standalone",
         "--agent",
         "oc-todo-resolver",
         "--format",
         "json",
-        "--dir",
-        "/tmp/work",
         "--title",
         "t1",
         "--auto",
@@ -170,12 +206,11 @@ def test_build_command_minimal(config: Config) -> None:
     assert cmd == [
         minimal.agent.binary,
         "run",
+        "--standalone",
         "--agent",
         "a",
         "--format",
         "json",
-        "--dir",
-        "/w",
         "b",
     ]
 
@@ -198,6 +233,8 @@ def test_happy_path(config: Config, tmp_path: Path) -> None:
     assert result.error is None
     captured = json.loads(argv_file.read_text(encoding="utf-8"))
     assert captured[-1] == "do the thing"  # positional brief last
+    assert "--dir" not in captured  # OpenCode 2.x rejects --dir
+    assert captured[:2] == ["run", "--standalone"]
 
 
 def test_error_mode(config: Config, tmp_path: Path) -> None:
@@ -259,3 +296,51 @@ def test_garbage_line_defensive_parse(config: Config, tmp_path: Path) -> None:
     assert result.status == "ok"
     assert result.final_text == "after garbage"
     assert len(result.events) == 1  # the malformed line was dropped, not stored
+
+
+def test_child_cwd_pwd_and_stdin(config: Config, tmp_path: Path) -> None:
+    """(a) Child runs with cwd == PWD == work_dir and stdin is /dev/null (not a pipe, EOF)."""
+    env_out = tmp_path / "env.json"
+    result, _ = _run(config, tmp_path, "env", extra_env={"SHIM_ENV_OUT": str(env_out)})
+    assert result.status == "ok"
+    info = json.loads(env_out.read_text(encoding="utf-8"))
+    work_dir = tmp_path / "work"
+    assert Path(info["cwd"]).resolve() == work_dir.resolve()
+    assert info["pwd"] == str(work_dir)
+    assert info["stdin_is_fifo"] is False
+    assert info["stdin_read"] == ""  # immediately at EOF
+    assert os.environ.get("PWD") != str(work_dir)  # parent env untouched
+
+
+def test_v2_error_event_shape(config: Config, tmp_path: Path) -> None:
+    """(b) 2.x error object {type, message} + exit 1 → "aborted: x"."""
+    result, _ = _run(config, tmp_path, "v2err", extra_env={"SHIM_EXIT": "1"})
+    assert result.status == "error"
+    assert result.exit_code == 1
+    assert result.error == "aborted: x"
+
+
+def test_text_joined_per_message(config: Config, tmp_path: Path) -> None:
+    """(c) Text events of the last message (distinct part.id) are joined in order."""
+    result, _ = _run(config, tmp_path, "join")
+    assert result.status == "ok"
+    assert result.final_text == "Hello, world."
+
+
+def test_text_same_part_id_latest_wins(config: Config, tmp_path: Path) -> None:
+    """(c) Two text events with the same part.id → only the latest text is kept."""
+    result, _ = _run(config, tmp_path, "dup")
+    assert result.status == "ok"
+    assert result.final_text == "draft final"
+
+
+def test_error_message_helper_shapes() -> None:
+    """_error_message: dict with type+message, message only, and legacy string."""
+    from agentic_scripts.agent import _error_message
+
+    assert _error_message({"type": "unknown", "message": "boom"}) == "unknown: boom"
+    assert _error_message({"message": "boom"}) == "boom"
+    assert _error_message("legacy failure") == "legacy failure"
+    assert _error_message({"type": "error", "sessionID": "s"}) == str(
+        {"type": "error", "sessionID": "s"}
+    )
