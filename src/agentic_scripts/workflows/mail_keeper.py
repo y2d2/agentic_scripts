@@ -24,8 +24,10 @@ Rationale:
     (see the global ``skills/mail-keeper`` skill). This split is what makes re-runs
     idempotent: an agent failure advances nothing, so the same batch is re-presented next
     run and the agent's dedup rule (grep msg-id before every write) makes re-delivery
-    safe. The workflow NEVER writes vault files, NEVER sends mail, and NEVER runs
-    ``notmuch new``.
+    safe. The runner owns maintenance of the git-ignored ``mail/daily/**`` day-files
+    (pruning checked entries + the ``.pruned.jsonl`` id log) — it NEVER writes vault
+    *content* (notes/todos), NEVER sends mail, and NEVER runs ``notmuch new`` or any git
+    binary.
 
     Backfill model (user decision 2026-10-23): history is processed **newest-first**
     (notmuch's natural row order — no reversal) in capped batches until every folder's
@@ -74,6 +76,7 @@ from agentic_scripts.mail import canary
 # read from the recovered object, never from ``doc["primary"]``. We import it rather than
 # duplicate the ~15-line helper (single source of truth for the quirk workaround).
 from agentic_scripts.mail.mail_search import _find_message_by_id
+from agentic_scripts.mail.prune import prune_daily
 from agentic_scripts.mail.reader import NotmuchError, NotmuchReader, q_folder
 from agentic_scripts.workflows.base import WorkflowResult
 
@@ -793,8 +796,9 @@ class MailKeeper:
     A stateless object whose single :meth:`run` performs one run against the shared
     context and reports its outcome as a :class:`WorkflowResult`. It never raises for
     business failures (the run body is wrapped and unexpected exceptions are mapped to
-    ``status="error"``), never writes vault files, never sends mail, and never runs
-    ``notmuch new``.
+    ``status="error"``), never writes vault *content* (notes/todos — it does maintain the
+    git-ignored ``mail/daily/**`` day-files), never sends mail, and never runs
+    ``notmuch new`` or any git binary.
 
     Attributes:
         name: The stable workflow name, matching its config key (``"mail-keeper"``).
@@ -806,16 +810,17 @@ class MailKeeper:
         """Perform one mail-keeper run and report its outcome.
 
         Purpose:
-            Execute the full pipeline: precheck (admin_repo + index readable), canary
-            (stale → report-and-defer, never lose), state load (v2 two-boundary cursors +
-            fixed 1-year floor; a v1-shaped state is a hard error), detection (three-pass
-            global collection — all folders' new mail, then deferred, then all folders'
-            history — with PII/own/processed exclusions), batch build (≤ MAX_BATCH, the cap
-            re-applied to the final batch so deferred never rides on top of it), pre-backup
-            snapshot, one agent invocation, and — only on ``ok`` — triage-class parse,
-            processed-log append, TRUE per-folder cursor advance (each folder's own new/max +
-            history-kind back/min; absent folders unchanged), deferred clear, and post-backup
-            byte-identity check.
+            Execute the full pipeline: precheck (admin_repo + index readable), runner-owned
+            prune of checked day-entries (every run, best-effort — reported in
+            actions/errors), canary (stale → report-and-defer, never lose), state load (v2
+            two-boundary cursors + fixed 1-year floor; a v1-shaped state is a hard error),
+            detection (three-pass global collection — all folders' new mail, then deferred,
+            then all folders' history — with PII/own/processed exclusions), batch build
+            (≤ MAX_BATCH, the cap re-applied to the final batch so deferred never rides on
+            top of it), pre-backup snapshot, one agent invocation, and — only on ``ok`` —
+            triage-class parse, processed-log append, TRUE per-folder cursor advance (each
+            folder's own new/max + history-kind back/min; absent folders unchanged),
+            deferred clear, and post-backup byte-identity check.
 
         Args:
             ctx: The shared :class:`~agentic_scripts.workflows.base.WorkContext`.
@@ -824,13 +829,17 @@ class MailKeeper:
             A :class:`WorkflowResult`: ``skipped`` (admin_repo unset or index missing),
             ``ok`` (no new mail, or a successful agent run with an unchanged backup tree),
             or ``error`` (agent failure, agent step-cap exhaustion (sentinel on the final
-            message), guardrail trip, or an unexpected exception).
+            message), guardrail trip, a best-effort prune failure, or an unexpected
+            exception).
 
         Side Effects:
-            Read-only notmuch + filesystem; on the no-new-mail and agent-``ok`` paths it
-            persists state and (on ``ok``) appends to the processed log. An agent failure
-            writes NO state at all (fresh re-detection next run is identical). Never
-            touches vault files, never sends mail, never runs ``notmuch new``.
+            Read-only notmuch + filesystem; on every non-skipped run it prunes checked
+            day-entries under ``<admin_repo>/mail/daily/`` (best-effort — a failure is
+            recorded in ``errors`` and the pipeline continues); on the no-new-mail and
+            agent-``ok`` paths it persists state and (on ``ok``) appends to the processed
+            log. An agent failure writes NO state at all (fresh re-detection next run is
+            identical). Never touches vault *content* (notes/todos), never sends mail,
+            never runs ``notmuch new`` or any git binary.
         """
         try:
             return self._run(ctx)
@@ -850,6 +859,26 @@ class MailKeeper:
         admin_repo = ctx.admin_repo
         if admin_repo is None:
             return WorkflowResult(status="skipped", actions=["admin_repo not configured"])
+
+        # --- 1.5 Prune: runner-owned checkbox lifecycle — every run, incl. no-new-mail. --- #
+        # Vault cleanup is independent of notmuch-index health, so it runs BEFORE the index
+        # check (the defect being fixed: cleanup never ran when there was no mail or the
+        # index degraded). Best-effort: a prune failure is logged + recorded in `errors` and
+        # the pipeline continues (a cleanup glitch must not block triage — but silent failure
+        # is the defect, so it is surfaced).
+        try:
+            prune_res = prune_daily(admin_repo)
+        except Exception as exc:  # noqa: BLE001 - best-effort; a cleanup glitch must not block triage
+            ctx.logger.error("mail-keeper prune failed: %s", exc)
+            errors.append(f"prune failed: {exc}")
+        else:
+            if prune_res.entries_pruned or prune_res.files_deleted:
+                actions.append(
+                    f"pruned {prune_res.entries_pruned} checked entr(y/ies) "
+                    f"({len(prune_res.files_touched)} day-file(s) touched, "
+                    f"{len(prune_res.files_deleted)} deleted, "
+                    f"{len(prune_res.ids_recorded)} id(s) recorded)"
+                )
 
         index_db = Path(_env_str("MAIL_INDEX_DB", _DEFAULT_INDEX_DB))
         mail_root = Path(_env_str("MAIL_MAIL_ROOT", _DEFAULT_MAIL_ROOT))
@@ -928,7 +957,12 @@ class MailKeeper:
             actions.append(
                 f"no new mail ({len(processed_ids)} candidates excluded: PII/own/processed)"
             )
-            return WorkflowResult(status="ok", items_found=0, actions=actions, errors=errors)
+            # Derive status from `errors` (as the agent-ok path does): a best-effort prune
+            # failure on this path is surfaced as an error, not silently swallowed.
+            status = "error" if errors else "ok"
+            return WorkflowResult(
+                status=status, items_found=0, actions=actions, errors=errors
+            )
 
         # --- 6. Pre-walk: snapshot the backup tree right before the agent call. --- #
         snapshot_before = _backup_snapshot(mail_root)

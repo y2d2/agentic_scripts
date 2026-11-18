@@ -1342,3 +1342,268 @@ def test_base_smoke_compatibility():
     )
     assert proc.returncode == 0, f"base smoke failed:\n{proc.stdout}\n{proc.stderr}"
     assert "5 passed" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# 11. Runner-owned prune of checked day-entries (Task 2 — every run path)     #
+# --------------------------------------------------------------------------- #
+def _day_entry(checked: bool, subject: str, msg_id: str) -> str:
+    """Render one day-file entry block in the documented checkbox format.
+
+    Args:
+        checked: True for a ``- [x]`` (pruned) entry, False for ``- [ ]`` (kept).
+        subject: The entry's checkbox-line text.
+        msg_id: The RFC 5322 Message-ID carried on the entry's ``id:`` line.
+
+    Returns:
+        The entry block as a string (checkbox line + indented continuation lines,
+        trailing newline; the caller joins blocks with blank lines).
+    """
+    box = "x" if checked else " "
+    return (
+        f"- [{box}] {subject}\n"
+        f"    Summary: {subject}.\n"
+        "    People: sender@fixture.test\n"
+        "    Artifacts: none\n"
+        f"    id: {msg_id}\n"
+    )
+
+
+def _write_day_file(daily_dir: Path, date: str, entries: list[str]) -> Path:
+    """Write a day-file ``<daily_dir>/<date>.md`` with the given entry blocks.
+
+    Args:
+        daily_dir: The vault's ``mail/daily`` directory (created if absent).
+        date: The ``YYYY-MM-DD`` date for the day-file name and header.
+        entries: The entry-block strings (as produced by :func:`_day_entry`), joined
+            with a blank line between them under the ``# Mail daily — <date>`` header.
+
+    Returns:
+        The path of the written day-file.
+    """
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    path = daily_dir / f"{date}.md"
+    body = f"# Mail daily — {date}\n\n" + "\n".join(entries)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _read_pruned_ids(daily_dir: Path) -> list[str]:
+    """Read the vault's ``.pruned.jsonl`` into a list of msg-id strings (empty if absent)."""
+    pruned = daily_dir / ".pruned.jsonl"
+    if not pruned.is_file():
+        return []
+    lines = pruned.read_text(encoding="utf-8").splitlines()
+    return [line.strip() for line in lines if line.strip()]
+
+
+def test_no_new_mail_run_prunes_checked_entries(hermetic_mail, tmp_path, monkeypatch):
+    """The user's exact scenario: a no-new-mail run prunes checked day-file entries and
+    deletes emptied day-files (the core defect being fixed — cleanup never ran on the
+    no-new-mail path)."""
+    _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+
+    # Run 1 (fresh state → the newest-first backfill batch) so run 2 has nothing new.
+    fake1 = _FakeRunner(
+        _ok_result(
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
+        )
+    )
+    admin_repo = tmp_path / "admin"
+    ctx1 = _make_ctx(tmp_path, hermetic_mail, admin_repo=admin_repo, fake_runner=fake1)
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+
+    # Before run 2: seed the vault's day-files with checked + unchecked entries.
+    daily_dir = admin_repo / "mail" / "daily"
+    _write_day_file(
+        daily_dir,
+        "2026-11-14",
+        [
+            _day_entry(True, "checked item one", "test1@vault.example"),
+            _day_entry(False, "pending item two", "test2@vault.example"),
+        ],
+    )
+    _write_day_file(
+        daily_dir,
+        "2026-11-13",
+        [
+            _day_entry(True, "checked old one", "test3@vault.example"),
+            _day_entry(True, "checked old two", "test4@vault.example"),
+        ],
+    )
+
+    # Run 2: no new mail → the prune step runs BEFORE the empty-batch early return.
+    fake2 = _FakeRunner(_ok_result("no-op"))  # must NOT be called (no agent dispatch)
+    ctx2 = _make_ctx(tmp_path, hermetic_mail, admin_repo=admin_repo, fake_runner=fake2)
+    result2 = _run_workflow(ctx2)
+
+    assert result2.status == "ok"
+    assert result2.items_found == 0
+    assert len(fake2.calls) == 0, "a no-new-mail run must not dispatch the agent"
+
+    # 2026-11-14.md now contains ONLY the unchecked entry (byte-check the surviving block).
+    survivor = (daily_dir / "2026-11-14.md").read_text(encoding="utf-8")
+    assert "- [ ] pending item two" in survivor
+    assert "test2@vault.example" in survivor
+    assert "checked item one" not in survivor
+    assert "test1@vault.example" not in survivor
+
+    # 2026-11-13.md (all checked) is deleted.
+    assert not (daily_dir / "2026-11-13.md").exists()
+
+    # .pruned.jsonl records the 3 pruned msg-ids (day-files are processed in sorted name
+    # order: 2026-11-13 before 2026-11-14).
+    assert _read_pruned_ids(daily_dir) == [
+        "test3@vault.example",
+        "test4@vault.example",
+        "test1@vault.example",
+    ]
+
+    # Exactly one actions entry reports the prune (and it leads with the count).
+    pruned_actions = [a for a in result2.actions if a.startswith("pruned 3 checked")]
+    assert len(pruned_actions) == 1, (
+        f"expected exactly one 'pruned 3 checked' action: {result2.actions}"
+    )
+
+
+def test_prune_runs_on_agent_path_too(hermetic_mail, tmp_path, monkeypatch):
+    """A run WITH new mail also prunes (the agent path is not the only place it fires)."""
+    log_path = _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+
+    # Run 1 (fresh state → backfill batch) so run 2 has nothing new but a day-file to prune.
+    fake1 = _FakeRunner(
+        _ok_result(
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
+        )
+    )
+    admin_repo = tmp_path / "admin"
+    ctx1 = _make_ctx(tmp_path, hermetic_mail, admin_repo=admin_repo, fake_runner=fake1)
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+
+    # Before run 2: seed a day-file with one checked entry (to be pruned on the agent path).
+    daily_dir = admin_repo / "mail" / "daily"
+    _write_day_file(
+        daily_dir,
+        "2026-11-14",
+        [_day_entry(True, "checked item one", "test1@vault.example")],
+    )
+
+    # Run 2: add a NEW message (m7) so the manifest is non-empty → the agent path runs.
+    m7_body = f"""From: New Sender <new@fixture.test>
+To: someone@example.test
+Subject: New mail during backfill
+Message-Id: <{M7_ID}>
+Date: Tue, 22 Oct 2026 12:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+A brand-new message arriving while the backfill is in flight.
+"""
+    _write_message("INBOX", "m7.eml", m7_body, hermetic_mail["mail_root"])
+    _build_index(hermetic_mail["index_path"], hermetic_mail["mail_root"], tmp_path / "reindex")
+
+    fake2 = _FakeRunner(_ok_result(_triage_table([(M7_ID, "info")])))
+    ctx2 = _make_ctx(tmp_path, hermetic_mail, admin_repo=admin_repo, fake_runner=fake2)
+    result2 = _run_workflow(ctx2)
+
+    # Agent called exactly once (the new-mail path), with the single m7 entry.
+    assert len(fake2.calls) == 1
+    assert _manifest_ids_from_brief(fake2.calls[0]["brief"]) == [M7_ID]
+
+    # The checked entry was pruned and its id recorded.
+    assert not (daily_dir / "2026-11-14.md").exists()
+    assert _read_pruned_ids(daily_dir) == ["test1@vault.example"]
+
+    # Normal ok result carrying BOTH the prune action and the agent-ok action.
+    assert result2.status == "ok"
+    assert any(a.startswith("pruned 1 checked") for a in result2.actions), (
+        f"expected a 'pruned 1 checked' action: {result2.actions}"
+    )
+    assert any(a.startswith("agent ok") for a in result2.actions), (
+        f"expected an 'agent ok' action: {result2.actions}"
+    )
+
+    # The processed log gained exactly one record (m7) on this run.
+    records = _read_processed_log(log_path)
+    assert len(records) == 7  # 6 from run 1 + 1 from run 2
+    assert records[-1]["email_file"] == M7_ID
+
+
+def test_prune_failure_is_reported_but_pipeline_continues(hermetic_mail, tmp_path, monkeypatch):
+    """A prune failure is surfaced in ``errors`` but does not block the pipeline."""
+    _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+
+    # Run 1 (fresh state → backfill batch) so run 2 has nothing new.
+    fake1 = _FakeRunner(
+        _ok_result(
+            _triage_table(
+                [
+                    (M3_ID, "noise"),
+                    (M2_ID, "noise"),
+                    (M1_ID, "action"),
+                    (M9_ID, "noise"),
+                    (M6_ID, "noise"),
+                    (M10_ID, "noise"),
+                ]
+            )
+        )
+    )
+    admin_repo = tmp_path / "admin"
+    ctx1 = _make_ctx(tmp_path, hermetic_mail, admin_repo=admin_repo, fake_runner=fake1)
+    result1 = _run_workflow(ctx1)
+    assert result1.status == "ok"
+
+    # Force the prune to fail on run 2.
+    def _raise_prune(_vault_root):
+        raise OSError("vault locked")
+
+    monkeypatch.setattr(mail_keeper, "prune_daily", _raise_prune)
+
+    fake2 = _FakeRunner(_ok_result("no-op"))  # must NOT be called (no agent dispatch)
+    ctx2 = _make_ctx(tmp_path, hermetic_mail, admin_repo=admin_repo, fake_runner=fake2)
+    result2 = _run_workflow(ctx2)
+
+    assert result2.status == "error"
+    assert any(e.startswith("prune failed:") for e in result2.errors), (
+        f"expected a 'prune failed:' error: {result2.errors}"
+    )
+    # The pipeline continued to the no-new-mail path and persisted state.
+    assert len(fake2.calls) == 0, "a no-new-mail run must not dispatch the agent"
+    assert any("no new mail" in a for a in result2.actions), (
+        f"the no-new-mail action must be present (state was persisted): {result2.actions}"
+    )
+
+
+def test_skip_when_no_admin_repo_skips_prune(hermetic_mail, tmp_path, monkeypatch):
+    """``admin_repo=None`` → skipped, and pruning is never attempted (no ``mail/daily``)."""
+    _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+
+    fake = _FakeRunner(_ok_result("must-not-run"))  # must NOT be called
+    ctx = _make_ctx(tmp_path, hermetic_mail, admin_repo=None, fake_runner=fake)
+    result = _run_workflow(ctx)
+
+    assert result.status == "skipped"
+    assert len(fake.calls) == 0
+    # No ``mail/daily`` directory was created anywhere under the test's tmp root — pruning
+    # is not attempted without a vault.
+    daily_dirs = list(tmp_path.rglob("daily"))
+    assert daily_dirs == [], f"no mail/daily dir should be created: {daily_dirs}"
