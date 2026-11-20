@@ -1288,6 +1288,140 @@ def test_backup_integrity_trip(hermetic_mail, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 8b. Backup snapshot dotfile exclusion (2026-11-20 mbsync false-trip)        #
+# --------------------------------------------------------------------------- #
+def test_backup_snapshot_ignores_dotfiles(hermetic_mail):
+    """Rewriting syncer dotfiles between two snapshots → snapshots stay equal (no trip).
+
+    Regression test for the 2026-11-20 false-trip incident: the host-side mbsync rewrote
+    the ``.mbsyncstate`` / ``.uidvalidity`` bookkeeping files mid-run and the byte-identity
+    guardrail tripped because the snapshot included dotfiles. Dot-prefixed entries are now
+    excluded, so the same rewrite must be invisible to the snapshot.
+    """
+    mail_root = hermetic_mail["mail_root"]
+    inbox = mail_root / ACCOUNT / "INBOX"
+    mbsync_state = inbox / ".mbsyncstate"
+    uidvalidity = inbox / ".uidvalidity"
+
+    mbsync_state.write_text("v3\ninitial\n", encoding="utf-8")
+    uidvalidity.write_text("12345\n", encoding="utf-8")
+    try:
+        snap1 = mail_keeper._backup_snapshot(mail_root)
+
+        # Rewrite both dotfiles: different bytes + an explicit mtime bump.
+        mbsync_state.write_text("v3\nrewritten-by-host-syncer\n", encoding="utf-8")
+        uidvalidity.write_text("99999\n", encoding="utf-8")
+        now = time.time_ns()
+        os.utime(mbsync_state, ns=(now, now + 1_000_000_000))
+        os.utime(uidvalidity, ns=(now + 1_000_000_000, now + 2_000_000_000))
+
+        snap2 = mail_keeper._backup_snapshot(mail_root)
+    finally:
+        # Keep the module-scoped fixture pristine for the other tests.
+        mbsync_state.unlink()
+        uidvalidity.unlink()
+
+    assert snap1 == snap2, "syncer dotfile rewrites must not trip the guardrail"
+    # Neither dotfile is a snapshot key (checked via its actual relative path).
+    for dotfile in (mbsync_state, uidvalidity):
+        assert str(dotfile.relative_to(mail_root)) not in snap1
+    # No dot-prefixed entry exists anywhere in the snapshot (keys are relative paths;
+    # check the basename so dotfiles at any depth are covered).
+    assert not any(Path(p).name.startswith(".") for p in snap1)
+
+
+def test_backup_snapshot_still_catches_mail_mutation(hermetic_mail):
+    """Touch / append / delete of a REAL mail file → snapshots differ (trip preserved).
+
+    The dotfile exclusion must not weaken the guardrail: every mutation of a real mail
+    file (mtime touch, content append, deletion) still flips the before/after comparison.
+    The fixture is module-scoped, so the file (content + mtime) is restored afterwards.
+    """
+    mail_root = hermetic_mail["mail_root"]
+    mail_file = mail_root / ACCOUNT / "INBOX" / "cur" / "m1.eml"
+    original = mail_file.read_bytes()
+    st = mail_file.stat()
+    try:
+        # (a) Touch: mtime bump only (small sleep for mtime resolution, as the trip test).
+        snap1 = mail_keeper._backup_snapshot(mail_root)
+        time.sleep(0.01)
+        mail_file.touch()
+        snap2 = mail_keeper._backup_snapshot(mail_root)
+        assert snap2 != snap1, "touching a real mail file must trip the guardrail"
+
+        # (b) Append one byte: size + mtime change (re-snapshot fresh before the step).
+        snap1 = mail_keeper._backup_snapshot(mail_root)
+        with open(mail_file, "ab") as f:
+            f.write(b"x")
+        snap2 = mail_keeper._backup_snapshot(mail_root)
+        assert snap2 != snap1, "appending to a real mail file must trip the guardrail"
+        mail_file.write_bytes(original)  # restore before the deletion step re-snapshots
+
+        # (c) Delete: the entry must vanish from the snapshot.
+        snap1 = mail_keeper._backup_snapshot(mail_root)
+        mail_file.unlink()
+        snap2 = mail_keeper._backup_snapshot(mail_root)
+        assert snap2 != snap1, "deleting a real mail file must trip the guardrail"
+    finally:
+        # Restore the module-scoped fixture (content + mtime) for the other tests.
+        mail_file.write_bytes(original)
+        os.utime(mail_file, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def test_backup_integrity_no_trip_on_sync_state_rewrite(hermetic_mail, tmp_path, monkeypatch):
+    """Syncer dotfile rewrite between the guardrail snapshots → status ok, no trip.
+
+    Integration mirror of ``test_backup_integrity_trip``: the 2nd snapshot call rewrites
+    a NEW syncer dotfile (different bytes + mtime bump) instead of touching a mail file —
+    the exact 2026-11-20 false-trip scenario. With dotfiles excluded, the workflow must
+    finish ok with the ``backup tree unchanged`` action.
+    """
+    _set_mail_env(monkeypatch, hermetic_mail, tmp_path)
+
+    dotfile = hermetic_mail["mail_root"] / ACCOUNT / "INBOX" / ".mbsyncstate"
+    dotfile.write_text("v3\ninitial\n", encoding="utf-8")
+
+    real_snapshot = mail_keeper._backup_snapshot
+    mut_state = {"calls": 0}
+
+    def rewriting_snapshot(mail_root: Path) -> dict:
+        mut_state["calls"] += 1
+        if mut_state["calls"] == 2:
+            # Second call (post-agent): rewrite the syncer dotfile mid-run.
+            dotfile.write_text("v3\nrewritten-by-host-syncer\n", encoding="utf-8")
+            now = time.time_ns()
+            os.utime(dotfile, ns=(now, now + 1_000_000_000))
+        return real_snapshot(mail_root)
+
+    monkeypatch.setattr(mail_keeper, "_backup_snapshot", rewriting_snapshot)
+    try:
+        fake = _FakeRunner(
+            _ok_result(
+                _triage_table(
+                    [
+                        (M3_ID, "noise"),
+                        (M2_ID, "noise"),
+                        (M1_ID, "action"),
+                        (M9_ID, "noise"),
+                        (M6_ID, "noise"),
+                        (M10_ID, "noise"),
+                    ]
+                )
+            )
+        )
+        ctx = _make_ctx(tmp_path, hermetic_mail, admin_repo=tmp_path / "admin", fake_runner=fake)
+
+        result = _run_workflow(ctx)
+    finally:
+        # Keep the module-scoped fixture pristine for the other tests.
+        dotfile.unlink()
+
+    assert result.status == "ok"
+    assert not any("guardrail trip" in e for e in result.errors)
+    assert "backup tree unchanged" in result.actions
+
+
+# --------------------------------------------------------------------------- #
 # 9. Index missing                                                            #
 # --------------------------------------------------------------------------- #
 def test_index_missing(hermetic_mail, tmp_path, monkeypatch):

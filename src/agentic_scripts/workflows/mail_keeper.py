@@ -275,7 +275,12 @@ def _backup_snapshot(mail_root: Path) -> dict[str, tuple[int, int]]:
         Python ``os.walk`` is mandatory — GNU ``find`` does not descend into this maildir
         (reproduced failure), so it must never be used here. The walk is pure read-only;
         on the ~4.5 GB production tree it takes ~1–3 s, which is acceptable for a per-run
-        guardrail check.
+        guardrail check. Dot-prefixed entries (tool bookkeeping — mbsync's
+        ``.mbsyncstate`` / ``.uidvalidity``) are intentionally excluded: they are written
+        by the host-side syncer, never by the agent (permission-denied from the tree), so
+        excluding them does not weaken anti-violation detection. The exclusion fixes the
+        2026-11-20 false-trip incident, in which a mid-run host-side mbsync sync rewrote
+        the folder state files and the byte-identity guardrail tripped a healthy run.
 
     Args:
         mail_root: The maildir root to snapshot (the parent of the account directory).
@@ -291,6 +296,11 @@ def _backup_snapshot(mail_root: Path) -> dict[str, tuple[int, int]]:
     for dirpath, _dirnames, filenames in os.walk(root):
         base = Path(dirpath)
         for name in filenames:
+            if name.startswith("."):
+                # Tool bookkeeping (mbsync: .mbsyncstate / .uidvalidity, written by the
+                # host-side syncer mid-run 2026-11-20 11:00 -> false guardrail trip).
+                # Maildir mail files are epoch-uniq named and never dot-prefixed.
+                continue
             full = base / name
             try:
                 if not full.is_file():
