@@ -270,9 +270,7 @@ def test_render_brief_exact_format() -> None:
     )
     assert f"Marker: {MARKER_PREFIX} do x" in lines  # verbatim marker
     assert "Test command: none" in lines  # no test command
-    assert (
-        "Keep-instruction: no — implement the todo and remove the marker line exactly" in lines
-    )
+    assert "Keep-instruction: no — implement the todo and remove the marker line exactly" in lines
 
     keep_todo = Todo(
         repo="o/r", branch="dev", file="src/a.py", line=7, marker=f"{MARKER_PREFIX} do x", keep=True

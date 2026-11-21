@@ -88,7 +88,9 @@ def client(recorder: Recorder) -> GitHubClient:
 
 def test_create_pr_sends_exact_request(client: GitHubClient, recorder: Recorder) -> None:
     """create_pr issues exactly one POST with the exact URL, headers, and payload."""
-    recorder.next = FakeResponse(201, b'{"number": 7, "html_url": "https://github.com/owner/name/pull/7"}')
+    recorder.next = FakeResponse(
+        201, b'{"number": 7, "html_url": "https://github.com/owner/name/pull/7"}'
+    )
 
     result = client.create_pr(
         "owner",
@@ -127,7 +129,10 @@ def test_find_pr_by_head_returns_pr(client: GitHubClient, recorder: Recorder) ->
     assert len(recorder.calls) == 1
     method, url, headers, payload = recorder.calls[0]
     assert method == "GET"
-    assert url == "https://api.github.com/repos/owner/name/pulls?state=all&head=owner:oc-todo/abc123def456"
+    assert (
+        url
+        == "https://api.github.com/repos/owner/name/pulls?state=all&head=owner:oc-todo/abc123def456"
+    )
     assert payload is None
     assert "content-type" not in headers
     assert result == pr
@@ -152,9 +157,7 @@ def test_http_error_mapped(client: GitHubClient, recorder: Recorder) -> None:
     recorder.next = err
 
     with pytest.raises(GitHubError) as excinfo:
-        client.create_pr(
-            "owner", "name", title="t", body="b", head="owner:b", base="dev"
-        )
+        client.create_pr("owner", "name", title="t", body="b", head="owner:b", base="dev")
     assert excinfo.value.status == 422
     assert "Validation Failed" in excinfo.value.body
 
@@ -169,18 +172,14 @@ def test_transport_error_mapped(client: GitHubClient, recorder: Recorder) -> Non
     assert "connection refused" in str(excinfo.value)
 
 
-def test_missing_pat_no_network(
-    monkeypatch: pytest.MonkeyPatch, recorder: Recorder
-) -> None:
+def test_missing_pat_no_network(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
     """With no PAT, both methods raise a GitHubError naming GITHUB_PAT and make zero calls."""
     monkeypatch.delenv("GITHUB_PAT", raising=False)
     client = GitHubClient(pat="")
 
     for call in (
         lambda: client.find_pr_by_head("owner", "name", "oc-todo/abc123def456"),
-        lambda: client.create_pr(
-            "owner", "name", title="t", body="b", head="owner:b", base="dev"
-        ),
+        lambda: client.create_pr("owner", "name", title="t", body="b", head="owner:b", base="dev"),
     ):
         with pytest.raises(GitHubError) as excinfo:
             call()
@@ -189,9 +188,7 @@ def test_missing_pat_no_network(
     assert len(recorder.calls) == 0
 
 
-def test_env_pat_default(
-    monkeypatch: pytest.MonkeyPatch, recorder: Recorder
-) -> None:
+def test_env_pat_default(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
     """With GITHUB_PAT set and no explicit pat, the client sends Bearer env-pat."""
     monkeypatch.setenv("GITHUB_PAT", "env-pat")
     recorder.next = FakeResponse(200, b"[]")

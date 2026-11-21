@@ -122,8 +122,7 @@ def _make_fixture_repo(
     (src / "src" / "a.py").write_text("\n".join(a_lines) + "\n", encoding="utf-8")
     for i in range(extra_main_markers):
         (src / "src" / f"m{i}.py").write_text(
-            f"# {MARKER_PREFIX} extra marker {i}\n"
-            f"def m{i}():\n    return {i}\n",
+            f"# {MARKER_PREFIX} extra marker {i}\ndef m{i}():\n    return {i}\n",
             encoding="utf-8",
         )
     _git(src, "add", "-A")
@@ -196,8 +195,9 @@ class FakeGitHub:
                 "body": body,
             }
         )
-        self.create_calls.append({"owner": owner, "repo": repo, "title": title, "body": body,
-                                  "head": head, "base": base})
+        self.create_calls.append(
+            {"owner": owner, "repo": repo, "title": title, "body": body, "head": head, "base": base}
+        )
         return n, url
 
     def set_state(self, number: int, state: str, merged: bool = False) -> None:
@@ -277,7 +277,12 @@ class FakeRunner:
         )
 
     def run(
-        self, *, agent: str, brief: str, work_dir: Path, title: str | None = None,
+        self,
+        *,
+        agent: str,
+        brief: str,
+        work_dir: Path,
+        title: str | None = None,
         timeout_seconds: int | None = None,
     ) -> AgentResult:
         """Record the call and return the canned :class:`AgentResult` for this mode."""
@@ -285,19 +290,30 @@ class FakeRunner:
         if self.mode == "ok":
             self._do_ok_work(work_dir, brief)
             return AgentResult(
-                status="ok", exit_code=0, final_text=self._report(work_dir),
-                events=[], error=None, duration_seconds=0.1,
+                status="ok",
+                exit_code=0,
+                final_text=self._report(work_dir),
+                events=[],
+                error=None,
+                duration_seconds=0.1,
             )
         if self.mode == "timeout":
             return AgentResult(
-                status="timeout", exit_code=None, final_text=None, events=[],
-                error="agent run exceeded 300s", duration_seconds=300.0,
+                status="timeout",
+                exit_code=None,
+                final_text=None,
+                events=[],
+                error="agent run exceeded 300s",
+                duration_seconds=300.0,
             )
         if self.mode == "step-exhausted":
             return AgentResult(
-                status="ok", exit_code=0,
+                status="ok",
+                exit_code=0,
                 final_text="maximum steps reached — partial work, see summary",
-                events=[], error=None, duration_seconds=10.0,
+                events=[],
+                error=None,
+                duration_seconds=10.0,
             )
         if self.mode == "blockers":
             report = (
@@ -306,13 +322,21 @@ class FakeRunner:
                 "## Build / Tests\n- `pytest`: FAIL\n\n## Blockers\n- tests fail: 2 errors\n"
             )
             return AgentResult(
-                status="ok", exit_code=0, final_text=report, events=[], error=None,
+                status="ok",
+                exit_code=0,
+                final_text=report,
+                events=[],
+                error=None,
                 duration_seconds=5.0,
             )
         # "no-op": a normal report but no file change (the agent did nothing).
         return AgentResult(
-            status="ok", exit_code=0, final_text=self._report(work_dir), events=[],
-            error=None, duration_seconds=0.1,
+            status="ok",
+            exit_code=0,
+            final_text=self._report(work_dir),
+            events=[],
+            error=None,
+            duration_seconds=0.1,
         )
 
 
@@ -332,8 +356,12 @@ class RaisingRunner:
 
 
 def _write_config(
-    tmp_path: Path, *, repos: list[str], repo_urls: dict[str, str],
-    test_commands: dict[str, str] | None = None, max_todos_per_repo: int = 3,
+    tmp_path: Path,
+    *,
+    repos: list[str],
+    repo_urls: dict[str, str],
+    test_commands: dict[str, str] | None = None,
+    max_todos_per_repo: int = 3,
 ) -> Config:
     """Write a minimal valid config YAML under ``tmp_path`` and load it.
 
@@ -565,9 +593,7 @@ def test_merge_resolves_todo(tmp_path: Path) -> None:
     git = Git()
     git.clone(str(bare), scratch)
     a_text = (scratch / "src" / "a.py").read_text(encoding="utf-8")
-    (scratch / "src" / "a.py").write_text(
-        a_text.replace(MARKER_A + "\n", ""), encoding="utf-8"
-    )
+    (scratch / "src" / "a.py").write_text(a_text.replace(MARKER_A + "\n", ""), encoding="utf-8")
     git.add(scratch)
     assert git.commit(scratch, "remove marker A on main") is True
     git.push(scratch, "main")
@@ -670,9 +696,7 @@ def test_cap_limits_and_drains(tmp_path: Path) -> None:
     """[caps] 4 markers on main, cap 2 → run1: 2 PRs + note; run2: 2 more; run3: zero."""
     # Single-branch fixture (no dev) with 3 extra main markers = 4 total on main.
     bare, _ = _make_fixture_repo(tmp_path, with_dev=False, extra_main_markers=3)
-    cfg = _write_config(
-        tmp_path, repos=[REPO], repo_urls={REPO: str(bare)}, max_todos_per_repo=2
-    )
+    cfg = _write_config(tmp_path, repos=[REPO], repo_urls={REPO: str(bare)}, max_todos_per_repo=2)
     ctx = make_ctx(tmp_path, cfg)
     fake_gh = FakeGitHub()
 

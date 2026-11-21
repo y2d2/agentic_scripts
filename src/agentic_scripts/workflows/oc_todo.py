@@ -437,9 +437,7 @@ def plan_run(current: list[Todo], st: dict, pr_states: dict[str, str | None]) ->
         if status == "pr_open":
             pr_state = pr_states.get(todo.id)  # may be None (API error) or absent
             if pr_state == "open":
-                actions.append(
-                    {"action": "skip", "todo": todo, "reason": "PR already open"}
-                )
+                actions.append({"action": "skip", "todo": todo, "reason": "PR already open"})
             elif pr_state == "merged":
                 actions.append({"action": "resolve", "todo": todo})
             elif pr_state == "closed":
@@ -829,9 +827,7 @@ class OCTodoWorkflow:
         """
         return self._settings.repo_urls.get(repo) or f"https://github.com/{repo}.git"
 
-    def _clone_or_fetch(
-        self, ctx, repo: str, errors: list[str]
-    ) -> Path | None:
+    def _clone_or_fetch(self, ctx, repo: str, errors: list[str]) -> Path | None:
         """Clone ``repo`` into the sandbox on first sight, else fetch it.
 
         Purpose:
@@ -938,8 +934,12 @@ class OCTodoWorkflow:
         try:
             text = self._git.show_file(clone, ref, todo.file)
         except GitError as exc:
-            ctx.logger.warning("oc-todo: cannot read %s@%s for keep check — assuming no-keep: %s",
-                               todo.file, ref, exc)
+            ctx.logger.warning(
+                "oc-todo: cannot read %s@%s for keep check — assuming no-keep: %s",
+                todo.file,
+                ref,
+                exc,
+            )
             return replace(todo, keep=False)
         lines = text.splitlines()
         start = max(0, todo.line - 1)
@@ -970,7 +970,9 @@ class OCTodoWorkflow:
         except GitHubError as exc:
             logging.getLogger("agentic_scripts.oc_todo").warning(
                 "oc-todo: PR lookup failed for %s:%s — guardrail (skip, never re-create): %s",
-                owner, branch_name, exc,
+                owner,
+                branch_name,
+                exc,
             )
             return "api_error"
 
@@ -1015,23 +1017,32 @@ class OCTodoWorkflow:
         branch_name = todo.branch_name
 
         # --- Step 1: existing-PR check (at most ONE API call per run). --- #
-        lookup = cached_lookup if cached_lookup is not _NOT_LOOKED_UP else self._lookup_pr(
-            owner, name, branch_name
+        lookup = (
+            cached_lookup
+            if cached_lookup is not _NOT_LOOKED_UP
+            else self._lookup_pr(owner, name, branch_name)
         )
         if isinstance(lookup, dict):
             if lookup.get("merged") is True:
-                return self._outcome("resolved", "PR merged — todo resolved", None,
-                                     lookup.get("html_url"), None)
+                return self._outcome(
+                    "resolved", "PR merged — todo resolved", None, lookup.get("html_url"), None
+                )
             if lookup.get("state") == "open":
                 return self._outcome(
-                    "skipped", f"PR already open #{lookup.get('number')}",
-                    lookup.get("number"), lookup.get("html_url"), None,
+                    "skipped",
+                    f"PR already open #{lookup.get('number')}",
+                    lookup.get("number"),
+                    lookup.get("html_url"),
+                    None,
                 )
             # closed (unmerged) → fall through and retry.
         elif lookup == "api_error":
             return self._outcome(
-                "skipped", "PR state unknown (API error) — guardrail: no re-creation",
-                None, None, None,
+                "skipped",
+                "PR state unknown (API error) — guardrail: no re-creation",
+                None,
+                None,
+                None,
             )
         # lookup is None (no PR) → fresh attempt or orphan resume below.
 
@@ -1048,14 +1059,18 @@ class OCTodoWorkflow:
             sections: dict = {}
             try:
                 number, url = self._github.create_pr(
-                    owner, name, title=render_pr_title(todo.marker),
+                    owner,
+                    name,
+                    title=render_pr_title(todo.marker),
                     body=render_pr_body(todo, todo.repo, sections, ctx.run_id) + body_note,
-                    head=f"{owner}:{branch_name}", base=todo.branch,
+                    head=f"{owner}:{branch_name}",
+                    base=todo.branch,
                 )
             except GitHubError as exc:
                 return self._outcome("failed", f"create_pr failed: {exc}", None, None, commit_sha)
-            return self._outcome("pr_created", "resumed orphan branch (no agent re-run)",
-                                 number, url, commit_sha)
+            return self._outcome(
+                "pr_created", "resumed orphan branch (no agent re-run)", number, url, commit_sha
+            )
 
         # --- Steps 3–8 wrapped so the worktree is ALWAYS cleaned up. --- #
         wt = worktree_dir(ctx.sandbox_dir, todo.repo, todo.id)
@@ -1074,14 +1089,17 @@ class OCTodoWorkflow:
             runner = self._runner_override or ctx.runner
             brief = render_brief(ctx.run_id, todo, test_cmd)
             res = runner.run(
-                agent="oc-todo-resolver", brief=brief, work_dir=wt,
+                agent="oc-todo-resolver",
+                brief=brief,
+                work_dir=wt,
                 title=f"oc-todo {todo.id} ({ctx.run_id})",
             )
 
             # Step 5: agent gate.
             if res.status in {"error", "timeout"}:
-                return self._outcome("failed", f"agent {res.status}: {res.error or res.status}",
-                                     None, None, None)
+                return self._outcome(
+                    "failed", f"agent {res.status}: {res.error or res.status}", None, None, None
+                )
             if res.status == "ok" and _is_step_exhausted(res.final_text):
                 return self._outcome(
                     "failed", "agent hit its step cap — no complete fix", None, None, None
@@ -1090,16 +1108,20 @@ class OCTodoWorkflow:
             blockers = sections["blockers"].strip().lower()
             if blockers not in ("", "none"):
                 return self._outcome(
-                    "failed", f"agent reported blockers: {sections['blockers'][:200]}",
-                    None, None, None,
+                    "failed",
+                    f"agent reported blockers: {sections['blockers'][:200]}",
+                    None,
+                    None,
+                    None,
                 )
 
             # Step 6: commit (the idempotency primitive — False when the agent changed nothing).
             self._git.add(wt)
             created = self._git.commit(wt, render_pr_title(todo.marker))
             if created is False:
-                return self._outcome("failed", "agent made no changes — nothing to commit",
-                                     None, None, None)
+                return self._outcome(
+                    "failed", "agent made no changes — nothing to commit", None, None, None
+                )
             commit_sha = self._git.rev_parse(wt, "HEAD")
 
             # Step 7: push the fresh branch (never a protected/pre-existing one).
@@ -1110,12 +1132,16 @@ class OCTodoWorkflow:
 
             # Step 8: open the PR.
             number, url = self._github.create_pr(
-                owner, name, title=render_pr_title(todo.marker),
+                owner,
+                name,
+                title=render_pr_title(todo.marker),
                 body=render_pr_body(todo, todo.repo, sections, ctx.run_id),
-                head=f"{owner}:{branch_name}", base=todo.branch,
+                head=f"{owner}:{branch_name}",
+                base=todo.branch,
             )
-            return self._outcome("pr_created", "PR created from fresh worktree", number, url,
-                                 commit_sha)
+            return self._outcome(
+                "pr_created", "PR created from fresh worktree", number, url, commit_sha
+            )
         except GitError as exc:
             return self._outcome("failed", f"git failure: {exc}", None, None, None)
         finally:
@@ -1245,7 +1271,9 @@ class OCTodoWorkflow:
             current = self._scan_repo(ctx, repo, clone)
             items_found += len(current)
             ctx.logger.info(
-                "oc-todo: %s — found %d marker(s)", repo, len(current),
+                "oc-todo: %s — found %d marker(s)",
+                repo,
+                len(current),
             )
 
             # 3c. PR-state lookups for the pr_open subset (one API call each).
@@ -1275,7 +1303,10 @@ class OCTodoWorkflow:
                     int(old_entry.get("attempts", 0)) if isinstance(old_entry, dict) else 0
                 )
                 outcome = self._process_todo(
-                    ctx, todo, test_cmd, clone,
+                    ctx,
+                    todo,
+                    test_cmd,
+                    clone,
                     cached_lookup=pr_cache.get(todo.id, _NOT_LOOKED_UP),
                 )
                 self._apply_outcome(
@@ -1301,12 +1332,15 @@ class OCTodoWorkflow:
                 if action["action"] == "resolve" and "entry_id" in action:
                     tid = action["entry_id"]
                     todos_map[tid] = make_entry(
-                        Todo(repo=(action.get("entry") or {}).get("repo", repo),
-                             branch=(action.get("entry") or {}).get("branch", ""),
-                             file=(action.get("entry") or {}).get("file", "?"),
-                             line=int((action.get("entry") or {}).get("line", 0)),
-                             marker=(action.get("entry") or {}).get("marker", "")),
-                        "resolved", last_run_id=ctx.run_id,
+                        Todo(
+                            repo=(action.get("entry") or {}).get("repo", repo),
+                            branch=(action.get("entry") or {}).get("branch", ""),
+                            file=(action.get("entry") or {}).get("file", "?"),
+                            line=int((action.get("entry") or {}).get("line", 0)),
+                            marker=(action.get("entry") or {}).get("marker", ""),
+                        ),
+                        "resolved",
+                        last_run_id=ctx.run_id,
                     )
                     actions_out.append(
                         f"resolved {repo} (recorded entry {tid}): marker no longer present"
@@ -1330,8 +1364,15 @@ class OCTodoWorkflow:
         )
 
     def _apply_outcome(
-        self, ctx, repo: str, todo: Todo, old_attempts: int, outcome: dict,
-        todos_map: dict[str, dict], actions_out: list[str], errors: list[str],
+        self,
+        ctx,
+        repo: str,
+        todo: Todo,
+        old_attempts: int,
+        outcome: dict,
+        todos_map: dict[str, dict],
+        actions_out: list[str],
+        errors: list[str],
     ) -> None:
         """Apply one :meth:`_process_todo` outcome to the in-memory state + result lists.
 
@@ -1355,22 +1396,26 @@ class OCTodoWorkflow:
         status = outcome["status"]
         if status == "pr_created":
             todos_map[todo.id] = make_entry(
-                todo, "pr_open", pr_number=outcome["pr_number"], pr_url=outcome["pr_url"],
-                commit_sha=outcome["commit_sha"], attempts=old_attempts + 1, last_run_id=ctx.run_id,
+                todo,
+                "pr_open",
+                pr_number=outcome["pr_number"],
+                pr_url=outcome["pr_url"],
+                commit_sha=outcome["commit_sha"],
+                attempts=old_attempts + 1,
+                last_run_id=ctx.run_id,
             )
-            actions_out.append(
-                f"PR #{outcome['pr_number']} for {repo} ({todo.file}:{todo.line})"
-            )
+            actions_out.append(f"PR #{outcome['pr_number']} for {repo} ({todo.file}:{todo.line})")
         elif status == "skipped":
-            actions_out.append(
-                f"skipped {repo} ({todo.file}:{todo.line}): {outcome['reason']}"
-            )
+            actions_out.append(f"skipped {repo} ({todo.file}:{todo.line}): {outcome['reason']}")
         elif status == "resolved":
             todos_map[todo.id] = make_entry(todo, "resolved", last_run_id=ctx.run_id)
             actions_out.append(f"resolved {repo} ({todo.file}:{todo.line}): {outcome['reason']}")
         else:  # failed — a business error AND retryable state
             todos_map[todo.id] = make_entry(
-                todo, "failed", last_error=outcome["reason"], attempts=old_attempts + 1,
+                todo,
+                "failed",
+                last_error=outcome["reason"],
+                attempts=old_attempts + 1,
                 last_run_id=ctx.run_id,
             )
             errors.append(f"{repo} ({todo.file}:{todo.line}): {outcome['reason']}")

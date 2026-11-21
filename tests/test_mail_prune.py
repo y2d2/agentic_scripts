@@ -102,8 +102,13 @@ def test_mixed_file_prunes_checked_keeps_unchecked(tmp_path):
         "  > Me",
     )
     entries = [
-        _entry(True, "chk1@orbit.example.org", summary="Checked one with a draft block.",
-               artifacts="projects/ORBIT/01_Meetings.md → ## EUG Meetings", draft_lines=draft),
+        _entry(
+            True,
+            "chk1@orbit.example.org",
+            summary="Checked one with a draft block.",
+            artifacts="projects/ORBIT/01_Meetings.md → ## EUG Meetings",
+            draft_lines=draft,
+        ),
         _entry(False, "unk1@example.test", summary="Unchecked one."),
         _entry(True, "chk2@orbit.example.org", summary="Checked two."),
         _entry(False, "unk2@example.test", summary="Unchecked two."),

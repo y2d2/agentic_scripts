@@ -970,9 +970,7 @@ class MailKeeper:
             # Derive status from `errors` (as the agent-ok path does): a best-effort prune
             # failure on this path is surfaced as an error, not silently swallowed.
             status = "error" if errors else "ok"
-            return WorkflowResult(
-                status=status, items_found=0, actions=actions, errors=errors
-            )
+            return WorkflowResult(status=status, items_found=0, actions=actions, errors=errors)
 
         # --- 6. Pre-walk: snapshot the backup tree right before the agent call. --- #
         snapshot_before = _backup_snapshot(mail_root)

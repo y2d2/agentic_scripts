@@ -37,9 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED_CONFIG = REPO_ROOT / "config" / "workflows.yaml"
 
 
-def _write_config(
-    tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: Path
-) -> Path:
+def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: Path) -> Path:
     """Write a tmp copy of the shipped config pointed at the given dirs and return its path.
 
     Args:
