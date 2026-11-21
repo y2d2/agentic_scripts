@@ -23,6 +23,15 @@ oc_todo:
   max_todos_per_repo: 3      # max todos processed per repo per run
   test_commands: {}          # optional per-repo test command, e.g. { "owner/name": "uv run pytest" }
   repo_urls: {}              # optional clone-URL overrides per repo (local fixtures / mirrors)
+roadmap_prompts:
+  allowed_repos: []          # GitHub repos to scan for un-archived plans ("owner/name"); empty = no-op
+  listing_repo: y2d2/ARP_prompts   # live plan listing repo ("owner/name")
+  listing_repo_url: ""       # clone-URL override; "" = derived git@github.com:<listing_repo>.git
+  listing_path: plans.md     # listing file inside the listing repo
+  listing_branch: main       # branch holding the listing
+  run_timeout_minutes: 480   # per-job hard timeout for an execution run
+  test_commands: {}          # optional per-repo test command (keys must be in allowed_repos)
+  repo_urls: {}              # optional per-repo clone-URL overrides (local fixtures / mirrors)
 workflows:
   noop:
     enabled: true
@@ -36,3 +45,9 @@ workflows:
     enabled: true
     module: agentic_scripts.workflows.oc_todo
     agent: oc-todo-resolver
+  roadmap-dev:
+    enabled: false          # flipped to true in a later task (the module lands later)
+    module: agentic_scripts.workflows.roadmap_dev
+    agent: planner-enhanced
+    gate: idle              # quiet_window (default) or idle; idle = runs on every non-skipped fire,
+                            # its drain decision comes from the session-based idle gate

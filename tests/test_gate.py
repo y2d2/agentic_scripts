@@ -1,9 +1,10 @@
-"""Hermetic tests for the hybrid gate (``evaluate_gate``).
+"""Hermetic tests for the gates (``evaluate_gate`` and ``evaluate_idle_gate``).
 
-All times and loads are injected; no real clock, load, or host state is consulted. The
-gate's only I/O is its documented ``scheduler.json`` read/write, which is pointed at a
-tmp dir via :class:`StateStore`. Corrupt-state behaviour is asserted to raise
-:class:`StateError` (no silent reset).
+All times, loads, and session counts are injected; no real clock, load, or host state is
+consulted. Each gate's only I/O is its documented ``scheduler.json`` read/write, which is
+pointed at a tmp dir via :class:`StateStore`. Corrupt-state behaviour is asserted to
+raise :class:`StateError` (no silent reset). The two gates' streak keys
+(``gate_last_ok`` vs ``idle_gate_last_ok``) are asserted not to collide.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from agentic_scripts.config import Config, Machine, QuietWindow
-from agentic_scripts.scheduler import evaluate_gate
+from agentic_scripts.scheduler import evaluate_gate, evaluate_idle_gate
 from agentic_scripts.state import StateError, StateStore
 
 
@@ -152,3 +153,108 @@ def test_midnight_crossing_window(tmp_path: Path, base_config: Config) -> None:
 
     midday = datetime(2026, 10, 20, 13, 0)  # 13:00 — outside
     assert evaluate_gate(midday, (0.5, 0.5, 0.5), machine, store).open is False
+
+
+# --- idle gate (evaluate_idle_gate) ---------------------------------------------
+
+
+def test_idle_first_poll_records(tmp_path: Path, base_config: Config) -> None:
+    """I1. Zero active sessions, fresh state → closed 'no active sessions (1st …)';
+    idle_gate_last_ok set. NO quiet window: works at midday, any load is irrelevant."""
+    store = _store(tmp_path)
+
+    now = datetime(2026, 11, 20, 13, 0)  # midday — the idle gate has no window
+    result = evaluate_idle_gate(now, store, base_config.machine, 0)
+
+    assert result.open is False
+    assert result.reason == "no active sessions (1st idle poll recorded)"
+    assert store.load("scheduler").get("idle_gate_last_ok") is not None
+    # GateResult reuse semantics: load fields zeroed, window_open sentinel True.
+    assert (result.load1, result.load5, result.load15) == (0.0, 0.0, 0.0)
+    assert result.window_open is True
+
+
+def test_idle_second_poll_within_tolerance_opens(tmp_path: Path, base_config: Config) -> None:
+    """I2. Second idle poll 30 min later (within 30+10) → open '2nd consecutive'."""
+    store = _store(tmp_path)
+
+    first = datetime(2026, 11, 20, 13, 0)
+    evaluate_idle_gate(first, store, base_config.machine, 0)
+
+    second = first + timedelta(minutes=30)
+    result = evaluate_idle_gate(second, store, base_config.machine, 0)
+
+    assert result.open is True
+    assert result.reason == "no active sessions (2nd consecutive idle poll)"
+
+
+def test_idle_second_poll_beyond_tolerance_resets(tmp_path: Path, base_config: Config) -> None:
+    """I3. Second idle poll 45 min later (beyond 30+10) → closed '1st …'; prev re-recorded."""
+    store = _store(tmp_path)
+
+    first = datetime(2026, 11, 20, 13, 0)
+    evaluate_idle_gate(first, store, base_config.machine, 0)
+
+    second = first + timedelta(minutes=45)
+    result = evaluate_idle_gate(second, store, base_config.machine, 0)
+
+    assert result.open is False
+    assert result.reason == "no active sessions (1st idle poll recorded)"
+    stored = store.load("scheduler").get("idle_gate_last_ok")
+    parsed = datetime.fromisoformat(stored.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    assert abs((parsed - second).total_seconds()) < 60
+
+
+def test_idle_active_sessions_closes_and_clears(tmp_path: Path, base_config: Config) -> None:
+    """I4. N active sessions → closed 'N active session(s)'; idle_gate_last_ok cleared."""
+    store = _store(tmp_path)
+    # Pre-seed a streak so we can assert a non-idle poll clears it.
+    evaluate_idle_gate(datetime(2026, 11, 20, 13, 0), store, base_config.machine, 0)
+    assert store.load("scheduler").get("idle_gate_last_ok") is not None
+
+    now = datetime(2026, 11, 20, 13, 30)
+    result = evaluate_idle_gate(now, store, base_config.machine, 3)
+
+    assert result.open is False
+    assert result.reason == "3 active session(s)"
+    assert store.load("scheduler").get("idle_gate_last_ok") is None
+
+
+def test_idle_single_poll_required_opens_immediately(tmp_path: Path, base_config: Config) -> None:
+    """I5. gate_polls_required=1 → open on the first idle poll."""
+    store = _store(tmp_path)
+    machine = _machine(polls=1)
+
+    now = datetime(2026, 11, 20, 13, 0)
+    result = evaluate_idle_gate(now, store, machine, 0)
+
+    assert result.open is True
+    assert result.reason == "no active sessions (single idle poll)"
+    # A single-poll open must not record a streak (mirrors the quiet gate).
+    assert store.load("scheduler").get("idle_gate_last_ok") is None
+
+
+def test_idle_gate_never_touches_quiet_gate_key(tmp_path: Path, base_config: Config) -> None:
+    """I6. Idle-gate evaluations leave gate_last_ok untouched (separate streak keys)."""
+    store = _store(tmp_path)
+    seed = "2026-11-19T22:00:00+00:00"
+    store.update("scheduler", "gate_last_ok", seed)
+
+    now = datetime(2026, 11, 20, 13, 0)
+    evaluate_idle_gate(now, store, base_config.machine, 0)  # 1st idle poll recorded
+    evaluate_idle_gate(now + timedelta(minutes=1), store, base_config.machine, 2)  # clears idle
+
+    doc = store.load("scheduler")
+    assert doc["gate_last_ok"] == seed  # quiet-gate key untouched
+    assert doc["idle_gate_last_ok"] is None  # idle key driven by idle polls only
+
+
+def test_idle_corrupt_scheduler_state_raises(tmp_path: Path, base_config: Config) -> None:
+    """I7. Corrupt scheduler.json → StateError propagates (no silent reset)."""
+    store = _store(tmp_path)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "scheduler.json").write_text("not-json{{", encoding="utf-8")
+
+    now = datetime(2026, 11, 20, 13, 0)  # idle → the gate will try to load prev
+    with pytest.raises(StateError):
+        evaluate_idle_gate(now, store, base_config.machine, 0)

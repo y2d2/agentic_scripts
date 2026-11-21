@@ -1,9 +1,12 @@
 """Hermetic tests for the scheduler run loop (``run``), CLI surface, and registry.
 
-All gate inputs are injected (``now``/``load``) so no real clock or host load is consulted.
-Concurrency and kill-mid-run tests spawn subprocesses that import ``run`` with a slow test
-workflow registered via a tmp module on ``sys.path`` (referenced in a tmp config), proving
-"adding a workflow = new module + config entry, zero scheduler changes".
+All gate inputs are injected (``now``/``load``, and the active-session probe via
+``agentic_scripts.scheduler.read_active_sessions``) so no real clock, host load, or OpenCode
+service is consulted. Concurrency and kill-mid-run tests spawn subprocesses that import
+``run`` with a slow test workflow registered via a tmp module on ``sys.path`` (referenced
+in a tmp config), proving "adding a workflow = new module + config entry, zero scheduler
+changes". The per-workflow gate dispatch (quiet-gate skip vs idle-gate ``gate_open``) is
+covered by a tmp probe workflow that records the ``WorkContext`` it was invoked with.
 """
 
 from __future__ import annotations
@@ -395,3 +398,209 @@ def test_kill_mid_run_no_torn_state(tmp_path: Path) -> None:
     assert code == 0
     log_text = _run_logs(dirs["logs"])[-1].read_text(encoding="utf-8")
     assert "RUN END" in log_text
+
+
+# --------------------------------------------------------------------------- #
+# Per-workflow gate dispatch: quiet-gate skip vs idle-gate gate_open          #
+# --------------------------------------------------------------------------- #
+
+PROBE_WF_SOURCE = '''
+"""A probe test workflow that records the WorkContext it was invoked with."""
+from agentic_scripts.workflows.base import WorkflowResult
+
+
+class ProbeWorkflow:
+    """A workflow that records ctx.gate_open in state and reports ok."""
+
+    name = "idle_probe"
+
+    def run(self, ctx):
+        ctx.state.update("idle_probe", "gate_open", ctx.gate_open)
+        return WorkflowResult(status="ok", items_found=0, actions=["probe done"])
+
+
+def create(config):
+    """Return a :class:`ProbeWorkflow` instance (required workflow entry point)."""
+    return ProbeWorkflow()
+'''
+
+
+def _write_probe_pkg(tmp_path: Path) -> None:
+    """Write a ``test_probe_pkg`` package (with the ``idle_probe`` module) under ``tmp_path``.
+
+    The config loader rejects single-word module names, so the probe workflow lives in a
+    dotted package (``test_probe_pkg.idle_probe``), mirroring the slow-wf pattern.
+    """
+    pkg = tmp_path / "test_probe_pkg"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "idle_probe.py").write_text(PROBE_WF_SOURCE, encoding="utf-8")
+
+
+def _probe_workflows() -> dict:
+    """Return a workflows mapping with the shipped noop (quiet gate) plus an idle probe."""
+    return {
+        "noop": {"enabled": True, "module": "agentic_scripts.workflows.noop", "agent": None},
+        "idle_probe": {
+            "enabled": True,
+            "module": "test_probe_pkg.idle_probe",
+            "agent": None,
+            "gate": "idle",
+        },
+    }
+
+
+def _probe_state(dirs: dict[str, Path]) -> dict:
+    """Return the probe workflow's recorded state (its run always writes gate_open)."""
+    return json.loads((dirs["state"] / "idle_probe.json").read_text(encoding="utf-8"))
+
+
+def test_gate_closed_idle_workflow_runs_gate_open_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quiet gate closed + enabled idle-gate workflow → loop runs; idle wf gets gate_open=False.
+
+    The probe reports 1 active session, so the (first) idle-gate poll records and stays
+    closed: the idle workflow is invoked with gate_open=False, while the quiet-gate noop
+    is skipped with a summary line (the old whole-run early-return behavior, per-workflow).
+    """
+    dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
+    for d in dirs.values():
+        d.mkdir(parents=True)
+    _write_probe_pkg(tmp_path)
+    cfg = _write_config(tmp_path, **_dir_kwargs(dirs), workflows=_probe_workflows())
+    monkeypatch.setattr("agentic_scripts.scheduler.read_active_sessions", lambda: 1)
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        now = datetime(2026, 11, 20, 13, 0)  # outside the quiet window
+        code = run(["run", "--config", str(cfg)], now=now, load=(0.5, 0.5, 0.5), run_id="idle-1")
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    assert code == 0
+    log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
+    # Both gates logged their verdicts; the idle gate is closed on active sessions.
+    assert "verdict=CLOSED" in log_text
+    assert "reason=1 active session(s)" in log_text
+    # Quiet-gate workflow skipped; idle-gate workflow ran.
+    assert "WORKFLOW noop status=skipped reason=quiet gate closed" in log_text
+    assert "WORKFLOW idle_probe status=ok" in log_text
+    assert _probe_state(dirs)["gate_open"] is False
+    # The skipped workflow performed no side effects. last-run renders the first
+    # summary line (existing _last_run_lines behavior): the noop skip.
+    assert not (dirs["state"] / "noop.json").exists()
+    last = _last_run(dirs["logs"])
+    assert "noop=skipped" in last
+
+
+def test_gate_closed_idle_gate_open_runs_gate_open_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two midday polls with zero active sessions → 2nd run: quiet closed, idle open.
+
+    Run 1 (13:00) records the first idle poll (idle gate stays closed → gate_open=False);
+    run 2 (13:30, within 30+10) opens the idle gate → the idle workflow runs with
+    gate_open=True while the quiet gate is still closed and the noop is still skipped.
+    """
+    dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
+    for d in dirs.values():
+        d.mkdir(parents=True)
+    _write_probe_pkg(tmp_path)
+    cfg = _write_config(tmp_path, **_dir_kwargs(dirs), workflows=_probe_workflows())
+    monkeypatch.setattr("agentic_scripts.scheduler.read_active_sessions", lambda: 0)
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        t1 = datetime(2026, 11, 20, 13, 0)  # midday → quiet gate closed on window
+        code1 = run(["run", "--config", str(cfg)], now=t1, load=(0.5, 0.5, 0.5), run_id="idle-2a")
+        assert code1 == 0
+        log1 = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
+        assert "reason=no active sessions (1st idle poll recorded)" in log1
+        assert _probe_state(dirs)["gate_open"] is False
+
+        t2 = t1 + timedelta(minutes=30)  # within 30+10 tolerance → idle gate opens
+        code2 = run(["run", "--config", str(cfg)], now=t2, load=(0.5, 0.5, 0.5), run_id="idle-2b")
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    assert code2 == 0
+    log2 = _run_logs(dirs["logs"])[1].read_text(encoding="utf-8")
+    assert "reason=no active sessions (2nd consecutive idle poll)" in log2
+    assert "WORKFLOW noop status=skipped reason=quiet gate closed" in log2
+    assert "WORKFLOW idle_probe status=ok" in log2
+    assert _probe_state(dirs)["gate_open"] is True
+
+
+def test_forced_run_all_run_gate_open_no_gate_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--force → all selected workflows run with gate_open=True; NO gate streak state written.
+
+    The probe is patched to raise if called at all: a forced run must bypass BOTH gates
+    (quiet and idle) and therefore never probe or write either streak key.
+    """
+    dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
+    for d in dirs.values():
+        d.mkdir(parents=True)
+    _write_probe_pkg(tmp_path)
+    cfg = _write_config(tmp_path, **_dir_kwargs(dirs), workflows=_probe_workflows())
+
+    def _probe_must_not_run() -> int:
+        raise AssertionError("read_active_sessions must not be called under --force")
+
+    monkeypatch.setattr("agentic_scripts.scheduler.read_active_sessions", _probe_must_not_run)
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        code = run(
+            ["run", "--force", "--config", str(cfg)],
+            now=datetime(2026, 11, 20, 13, 0),  # even out-of-window; --force bypasses the gate
+            load=(99.0, 99.0, 99.0),
+            run_id="forced-idle",
+        )
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    assert code == 0
+    log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
+    assert "RUN START force=True" in log_text
+    assert "WORKFLOW noop status=ok" in log_text
+    assert "WORKFLOW idle_probe status=ok" in log_text
+    assert "RUN END gate=forced" in log_text
+    assert _probe_state(dirs)["gate_open"] is True
+    # No gate streak state at all: the scheduler.json document was never written.
+    assert not (dirs["state"] / "scheduler.json").exists()
+
+
+def test_only_disabled_roadmap_dev_is_clean_noop(tmp_path: Path) -> None:
+    """--only roadmap-dev while it ships disabled → not a usage error; a clean gate no-op.
+
+    The shipped config registers roadmap-dev with enabled: false, so ``list_enabled``
+    returns no entries (no SchedulerUsageError — the name IS registered). With the quiet
+    gate closed and no selected idle-gate workflow, the run early-returns 0 as a skip.
+    """
+    dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
+    for d in dirs.values():
+        d.mkdir(parents=True)
+    cfg = _write_config(tmp_path, **_dir_kwargs(dirs))  # shipped workflows incl. roadmap-dev
+
+    now = datetime(2026, 11, 20, 13, 0)  # outside the quiet window → gate closed
+    code = run(
+        ["run", "--only", "roadmap-dev", "--config", str(cfg)],
+        now=now,
+        load=(0.5, 0.5, 0.5),
+        run_id="only-disabled",
+    )
+
+    assert code == 0
+    log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
+    assert "verdict=CLOSED" in log_text
+    last = _last_run(dirs["logs"])
+    assert "overall: skipped" in last
+    assert "workflows: -" in last
+    # No workflow ran: no roadmap-dev state. The quiet gate was evaluated (it clears
+    # its own streak), but the idle gate was NOT (early return) → no idle streak key.
+    assert not (dirs["state"] / "roadmap-dev.json").exists()
+    sched = json.loads((dirs["state"] / "scheduler.json").read_text(encoding="utf-8"))
+    assert "idle_gate_last_ok" not in sched

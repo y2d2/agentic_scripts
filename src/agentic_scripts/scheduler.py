@@ -1,20 +1,26 @@
-"""Timer-agnostic scheduler core: hybrid gate, exclusive lock, and run loop.
+"""Timer-agnostic scheduler core: per-workflow gates, exclusive lock, and run loop.
 
 Purpose:
     Implement the load-aware scheduling core behind the ``agentic-scripts`` CLI: a
-    *hybrid* gate that opens only when the machine is inside its quiet window AND the
-    1-minute load has stayed below threshold across two consecutive polls, an
-    exclusive skip-if-held lock so overlapping timer firings never deadlock or double-run,
-    and a single ``run()`` loop that assembles config → dotenv → logger → lock → gate →
-    workflows → last-run summary. Every run writes ``logs/run-<run_id>.log`` and refreshes
-    ``logs/last-run.txt`` so the unattended system is auditable without a dashboard.
+    machine-global *quiet-window* gate that opens only when the machine is inside its
+    quiet window AND the 1-minute load has stayed below threshold across two consecutive
+    polls, a session-based *idle* gate (open iff the shared OpenCode service reports zero
+    active interactive sessions, same two-poll rule, separate state key) for workflows
+    registered with ``gate: idle``, an exclusive skip-if-held lock so overlapping timer
+    firings never deadlock or double-run, and a single ``run()`` loop that assembles
+    config → dotenv → logger → lock → gates → workflows → last-run summary. Every run
+    writes ``logs/run-<run_id>.log`` and refreshes ``logs/last-run.txt`` so the
+    unattended system is auditable without a dashboard.
 
 Rationale:
     The timer fires often (every 30 min) but must only do work when the machine is
     *sustainedly* idle — one idle blip must not open the gate ("wait until the machine
     is actually idle for ~1 hour"). ``evaluate_gate`` is kept pure apart from its
     documented state writes and takes the load as an argument (no psutil import) so gate
-    tests need no monkeypatching. The lock uses ``flock(LOCK_EX | LOCK_NB)``: a second
+    tests need no monkeypatching; ``evaluate_idle_gate`` follows the same purity contract
+    (it takes the active-session probe result as an argument) and reuses
+    :class:`GateResult` with its load fields zeroed (see its docstring). The lock uses
+    ``flock(LOCK_EX | LOCK_NB)``: a second
     invocation skips cleanly (returns None) rather than blocking, and the lock file is
     never unlinked (unlink races). Per-workflow failures are logged, not fatal — the next
     poll retries, which is safe because state is consulted before acting.
@@ -50,6 +56,7 @@ from agentic_scripts.config import (
     load_config,
 )
 from agentic_scripts.logging_setup import new_run_id, setup_run_logger, write_last_run
+from agentic_scripts.sessions import read_active_sessions
 from agentic_scripts.state import StateError, StateStore
 from agentic_scripts.workflows.base import WorkContext, WorkflowResult
 
@@ -86,10 +93,13 @@ class GateResult:
     Attributes:
         open: Whether the gate is open (workflows should run).
         reason: A short human-readable verdict phrase (e.g. ``"2nd consecutive idle poll"``).
-        load1: The 1-minute load average at evaluation time.
-        load5: The 5-minute load average at evaluation time.
-        load15: The 15-minute load average at evaluation time.
-        window_open: Whether the local clock is inside the quiet window.
+        load1: The 1-minute load average at evaluation time (0.0 for idle-gate results —
+            see :func:`evaluate_idle_gate`).
+        load5: The 5-minute load average at evaluation time (0.0 for idle-gate results).
+        load15: The 15-minute load average at evaluation time (0.0 for idle-gate results).
+        window_open: Whether the local clock is inside the quiet window (True for
+            idle-gate results — the idle gate has NO quiet window; the field is a
+            documented sentinel, not a window verdict).
         now: The local (naive) wall-clock time the gate was evaluated at.
     """
 
@@ -222,6 +232,117 @@ def evaluate_gate(
         load5=load5,
         load15=load15,
         window_open=window_open,
+        now=now,
+    )
+
+
+def evaluate_idle_gate(
+    now: datetime,
+    state: StateStore,
+    machine: Machine,
+    active_sessions: int,
+) -> GateResult:
+    """Evaluate the session-based idle gate for ``gate: idle`` workflows.
+
+    Purpose:
+        Open iff the shared OpenCode service reports NO active interactive sessions
+        (``active_sessions == 0``) — day or night. Deliberately has NO quiet window and
+        NO load check: "idle" means "the user is not at the box" (a load-based gate would
+        self-block, since the workflow's own jobs are what raise the load).
+
+    Rationale:
+        Reuses :class:`GateResult` with documented sentinel semantics (``load1``/``load5``/
+        ``load15`` carry 0.0 and ``window_open`` is True — neither has meaning for this
+        gate; the verdict is purely session-based). The two-consecutive-polls mechanics are
+        identical to :func:`evaluate_gate`` (first idle poll records a timestamp, a second
+        idle poll within ``poll_interval_minutes + gate_poll_tolerance_minutes`` opens, any
+        non-idle poll clears the streak, ``gate_polls_required == 1`` opens immediately),
+        but under a SEPARATE state key, ``idle_gate_last_ok``, so the two gates' streaks
+        never collide.
+
+    Args:
+        now: The local (naive) wall-clock time to evaluate at. All comparisons use this;
+            it is persisted as UTC when stored.
+        state: The durable :class:`StateStore`; the gate reads/writes the ``scheduler``
+            document's ``idle_gate_last_ok`` key (never ``gate_last_ok``).
+        machine: The validated :class:`~agentic_scripts.config.Machine` parameters
+            (``gate_polls_required``, ``poll_interval_minutes``,
+            ``gate_poll_tolerance_minutes``; window/load are NOT consulted).
+        active_sessions: The probe result — the number of active interactive sessions,
+            taken as an argument (no session probing inside) so tests inject it directly.
+
+    Returns:
+        A :class:`GateResult` with the verdict and a reason like
+        ``"no active sessions (1st idle poll recorded)"``,
+        ``"no active sessions (2nd consecutive idle poll)"``, or
+        ``"N active session(s)"``.
+
+    Side Effects:
+        Writes ``state/scheduler.json`` (``idle_gate_last_ok``) on every evaluation:
+        cleared to null when sessions are active, set to the UTC ISO-8601 of ``now`` on a
+        first idle poll. No other I/O.
+
+    Raises:
+        StateError: If the ``scheduler`` state document is corrupt (a real fault, not a
+            gate input) — propagates so the caller logs ERROR and aborts with exit 2.
+
+    Example:
+        >>> result = evaluate_idle_gate(now, store, machine, active_sessions=0)
+        >>> result.open in (True, False)
+        True
+    """
+    if active_sessions > 0:
+        state.update("scheduler", "idle_gate_last_ok", None)
+        return GateResult(
+            open=False,
+            reason=f"{active_sessions} active session(s)",
+            load1=0.0,
+            load5=0.0,
+            load15=0.0,
+            window_open=True,
+            now=now,
+        )
+
+    if machine.gate_polls_required == 1:
+        return GateResult(
+            open=True,
+            reason="no active sessions (single idle poll)",
+            load1=0.0,
+            load5=0.0,
+            load15=0.0,
+            window_open=True,
+            now=now,
+        )
+
+    prev_raw = state.load("scheduler").get("idle_gate_last_ok")  # may raise StateError (corrupt)
+    if prev_raw is not None:
+        prev = (
+            datetime.fromisoformat(prev_raw.replace("Z", "+00:00"))
+            .astimezone()
+            .replace(tzinfo=None)
+        )
+        max_gap = timedelta(
+            minutes=machine.poll_interval_minutes + machine.gate_poll_tolerance_minutes
+        )
+        if (now - prev) <= max_gap:
+            return GateResult(
+                open=True,
+                reason="no active sessions (2nd consecutive idle poll)",
+                load1=0.0,
+                load5=0.0,
+                load15=0.0,
+                window_open=True,
+                now=now,
+            )
+
+    state.update("scheduler", "idle_gate_last_ok", now.astimezone().isoformat())
+    return GateResult(
+        open=False,
+        reason="no active sessions (1st idle poll recorded)",
+        load1=0.0,
+        load5=0.0,
+        load15=0.0,
+        window_open=True,
         now=now,
     )
 
@@ -360,6 +481,25 @@ def _gate_line(gate: GateResult, machine: Machine) -> str:
     )
 
 
+def _idle_gate_line(gate: GateResult, active_sessions: int) -> str:
+    """Format the canonical GATE log line for an idle-gate evaluation.
+
+    Args:
+        gate: The :class:`GateResult` from :func:`evaluate_idle_gate` to render.
+        active_sessions: The probe result (number of active interactive sessions).
+
+    Returns:
+        A single INFO log line matching the documented format, e.g.
+        ``GATE now=... active_sessions=0 verdict=CLOSED
+        reason=no active sessions (1st idle poll recorded)``.
+    """
+    return (
+        f"GATE now={gate.now.isoformat()} "
+        f"active_sessions={active_sessions} "
+        f"verdict={'OPEN' if gate.open else 'CLOSED'} reason={gate.reason}"
+    )
+
+
 def _last_run_lines(
     run_id: str,
     trigger: str,
@@ -396,10 +536,14 @@ def run(
     """Run the full scheduler loop and return the process exit code.
 
     Assembles the pipeline in exact order: parse args → load config → load .env → set up
-    the run logger → acquire the exclusive lock → evaluate the gate (unless ``--force``)
-    → resolve enabled workflows → run each (a failure never stops the rest) → write the
-    last-run summary. Returning an int (rather than calling ``sys.exit``) keeps this
-    directly testable without catching ``SystemExit``.
+    the run logger → acquire the exclusive lock → evaluate the quiet gate (unless
+    ``--force``) → resolve enabled workflows → early-return 0 only when the quiet gate is
+    closed AND no selected workflow is idle-gated → evaluate the idle gate once (non-forced,
+    when at least one selected workflow is idle-gated; the active-session probe is
+    :func:`agentic_scripts.sessions.read_active_sessions`, patched in tests) → run each
+    workflow (quiet-gated workflows are skipped when their gate is closed; a failure
+    never stops the rest) → write the last-run summary. Returning an int (rather than
+    calling ``sys.exit``) keeps this directly testable without catching ``SystemExit``.
 
     Args:
         argv: Raw argument list to parse (defaults to ``sys.argv[1:]``). A bare/empty
@@ -465,7 +609,8 @@ def run(
         return 0
 
     try:
-        # Gate (unless forced). A corrupt scheduler state is a real fault → exit 2.
+        # Quiet gate (machine-global; unless forced). A corrupt scheduler state is a real
+        # fault → exit 2.
         gate = None
         if not args.force:
             try:
@@ -478,27 +623,9 @@ def run(
                 )
                 return 2
             logger.info(_gate_line(gate, config.machine))
-            if not gate.open:
-                duration = time.monotonic() - _t0
-                logger.info("RUN END gate=closed workflows=0 errors=0 duration=%.1fs", duration)
-                write_last_run(
-                    config.paths.log_dir,
-                    _last_run_lines(
-                        run_id,
-                        "gate",
-                        (
-                            f"gate: CLOSED now={gate.now.isoformat()} "
-                            f"load1={gate.load1:.2f} threshold={config.machine.load_threshold} "
-                            f"window={'open' if gate.window_open else 'closed'} "
-                            f"reason={gate.reason}"
-                        ),
-                        [],
-                        "skipped",
-                    ),
-                )
-                return 0
 
-        # Resolve workflows (usage error → exit 2).
+        # Resolve workflows BEFORE the gate-closed early return (usage error → exit 2), so
+        # a selected idle-gate workflow can keep the run going when the quiet gate is closed.
         try:
             entries = list_enabled(config, args.only)
         except SchedulerUsageError as exc:
@@ -509,11 +636,71 @@ def run(
             )
             return 2
 
-        # Run each workflow in order; a failure never stops the rest.
+        quiet_closed = gate is not None and not gate.open
+        idle_entries = [entry for entry in entries if entry.gate == "idle"]
+
+        # The gate-closed early return now applies only when NO selected workflow is
+        # idle-gate: idle-gate workflows run on every non-skipped fire and make their own
+        # drain decision from WorkContext.gate_open (the quiet gate's verdict is still
+        # honored for their quiet-window siblings, skipped below).
+        if quiet_closed and not idle_entries:
+            duration = time.monotonic() - _t0
+            logger.info("RUN END gate=closed workflows=0 errors=0 duration=%.1fs", duration)
+            write_last_run(
+                config.paths.log_dir,
+                _last_run_lines(
+                    run_id,
+                    "gate",
+                    (
+                        f"gate: CLOSED now={gate.now.isoformat()} "
+                        f"load1={gate.load1:.2f} threshold={config.machine.load_threshold} "
+                        f"window={'open' if gate.window_open else 'closed'} "
+                        f"reason={gate.reason}"
+                    ),
+                    [],
+                    "skipped",
+                ),
+            )
+            return 0
+
         state = StateStore(config.paths.state_dir)
+
+        # Idle gate: one evaluation per non-forced run, and only when at least one
+        # selected workflow is idle-gate (to keep the streak honest). --force bypasses
+        # BOTH gates and must not write either streak key.
+        idle_gate = None
+        if not args.force and idle_entries:
+            active = read_active_sessions()
+            try:
+                idle_gate = evaluate_idle_gate(now, state, config.machine, active)
+            except StateError as exc:
+                logger.error("state error: %s", exc)
+                write_last_run(
+                    config.paths.log_dir,
+                    _last_run_lines(run_id, "gate", None, [], "error"),
+                )
+                return 2
+            logger.info(_idle_gate_line(idle_gate, active))
+
+        # Run each workflow in order; a failure never stops the rest.
         summaries: list[str] = []
         error_count = 0
         for entry in entries:
+            if quiet_closed and entry.gate == "quiet_window":
+                # Quiet-gate workflow while the quiet gate is closed: skip (same verdict
+                # the old early-return gave the whole run) — logged and summarized.
+                logger.info("WORKFLOW %s status=skipped reason=quiet gate closed", entry.name)
+                summaries.append(f"{entry.name}=skipped(0 items, 0 actions, 0 errors)")
+                continue
+
+            # gate_open: idle-gate workflows get the one-shot idle-gate verdict for this
+            # fire (True under --force, which bypasses both gates); quiet-gate workflows
+            # get True — they are already gated by the quiet gate (or run forced).
+            if entry.gate == "idle" and not args.force:
+                gate_open = idle_gate.open
+            else:
+                gate_open = True
+
             try:
                 module = importlib.import_module(entry.module)
             except ImportError as exc:
@@ -538,6 +725,7 @@ def run(
                 workflow_name=entry.name,
                 sandbox_dir=config.paths.sandbox_dir,
                 admin_repo=config.admin_repo,
+                gate_open=gate_open,
             )
             t0 = time.monotonic()
             try:

@@ -68,6 +68,12 @@ class WorkContext:
         sandbox_dir: Directory in which the workflow may create side effects; keep all
             filesystem mutations inside here or other declared targets.
         admin_repo: Path to the admin (roadmap) repo, or None if not configured.
+        gate_open: For a workflow whose entry has ``gate: idle``: the idle gate's verdict
+            for THIS fire (``True`` under ``--force``, which bypasses both gates); the
+            workflow's drain decision starts from this flag. For ``gate: quiet_window``
+            workflows (and forced runs) the scheduler sets ``True`` — those runs are
+            already gated. Defaults to ``True`` so direct (non-scheduler) construction
+            stays permissive.
 
     Note:
         :attr:`git` and :attr:`runner` are lazy properties that import their modules on
@@ -84,6 +90,7 @@ class WorkContext:
     workflow_name: str
     sandbox_dir: Path
     admin_repo: Path | None
+    gate_open: bool = True
 
     def __post_init__(self) -> None:
         """Initialize lazy caches for the git and runner properties."""
