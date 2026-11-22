@@ -213,32 +213,38 @@ def prompts_clone_dir(sandbox_dir: Path) -> Path:
     return sandbox_dir / _PROMPTS_SUBDIR
 
 
-def plan_folder_hash(file_texts: dict[str, str]) -> str:
+def plan_folder_hash(file_contents: dict[str, bytes]) -> str:
     """Return the sha256 hex content hash of a plan folder.
 
     Purpose:
         The content component of the reviewed-plan identity: a byte-stable digest over the
-        folder's files (relative path + content, sorted by relative path), **skipping**
+        folder's files (relative path + raw bytes, sorted by relative path), **skipping**
         files whose basename is in :data:`DIAGNOSTIC_FILES` — workflow-written diagnostics
         must not change identity, while any user edit of any other plan file yields a new
         hash (and therefore a new identity and a new listing row).
 
+    Note:
+        The input is the scan layer's raw file bytes (binary-safe — plan folders may
+        contain binary assets such as images or committed build artifacts). For a
+        text-only folder the digest is byte-identical to the old text-based value: the
+        old code fed ``content.encode("utf-8")`` to the same sha256 stream.
+
     Args:
-        file_texts: Mapping of folder-relative path -> file text (as read by the scan
-            layer). Insertion order is irrelevant (the pairs are sorted).
+        file_contents: Mapping of folder-relative path -> raw file bytes (as read by the
+            scan layer). Insertion order is irrelevant (the pairs are sorted).
 
     Returns:
         The 64-char sha256 hex digest (empty dict -> sha256 of the empty string).
     """
     digest = hashlib.sha256()
-    for relpath, content in sorted(file_texts.items()):
+    for relpath, content in sorted(file_contents.items()):
         if Path(relpath).name in DIAGNOSTIC_FILES:
             continue
         # NUL separators keep (path, content) pairs unambiguous; .encode("utf-8") is
         # byte-stable by spec (UP012 is style-only, as in oc_todo.todo_id).
         digest.update(relpath.encode("utf-8"))  # noqa: UP012
         digest.update(b"\0")
-        digest.update(content.encode("utf-8"))  # noqa: UP012
+        digest.update(content)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -348,14 +354,15 @@ class PlanEntry:
     Attributes:
         dir: The plan folder path (e.g. ``"planning/orbit-sim"``).
         work_plan_text: The text of ``<dir>/work_plan.md``, or None when the folder is
-            malformed (no ``work_plan.md`` — :func:`discover_plans` skips such entries).
-        file_texts: Folder-relative path -> file text for the folder's files (the input to
-            :func:`plan_folder_hash`).
+            malformed (no readable ``work_plan.md``, or a non-UTF-8 one —
+            :func:`discover_plans` skips such entries).
+        file_contents: Folder-relative path -> raw file bytes for the folder's files
+            (binary-safe; the input to :func:`plan_folder_hash`).
     """
 
     dir: str
     work_plan_text: str | None
-    file_texts: dict[str, str]
+    file_contents: dict[str, bytes]
 
 
 def discover_plans(repo: str, branch: str, entries: list[PlanEntry]) -> list[Plan]:
@@ -391,7 +398,7 @@ def discover_plans(repo: str, branch: str, entries: list[PlanEntry]) -> list[Pla
                 branch=branch,
                 path=f"{entry.dir}/work_plan.md",
                 title=extract_title(entry.work_plan_text),
-                content_hash=plan_folder_hash(entry.file_texts),
+                content_hash=plan_folder_hash(entry.file_contents),
             )
         )
     plans.sort(key=lambda p: p.path)
@@ -1491,7 +1498,10 @@ class RoadmapDevWorkflow:
             outside an ``archived`` segment, and — per candidate folder — read
             ``work_plan.md`` plus every file under the folder at that ref into a
             :class:`PlanEntry`; :func:`discover_plans` then applies the pure validity
-            rules (malformed folders are skipped, never raised).
+            rules (malformed folders are skipped, never raised). File contents are read
+            as raw bytes (binary-safe — plan folders may contain binary assets such as
+            images or committed build artifacts); a non-UTF-8 ``work_plan.md`` makes the
+            folder malformed (skipped, logged WARNING).
 
         Args:
             ctx: The shared context (for logging).
@@ -1505,10 +1515,11 @@ class RoadmapDevWorkflow:
 
         Side Effects:
             Read-only git calls (:meth:`Git.branches`, :meth:`Git.ls_tree`,
-            :meth:`Git.show_file`). A :class:`GitError` mid-branch (e.g. a vanished ref)
-            is logged and that branch skipped — the scan continues; an unreadable file
-            inside a plan folder is treated as absent (logged), and an unreadable
-            ``work_plan.md`` makes the folder malformed (skipped, logged WARNING).
+            :meth:`Git.show_file_bytes`). A :class:`GitError` mid-branch (e.g. a vanished
+            ref) is logged and that branch skipped — the scan continues; an unreadable
+            file inside a plan folder is treated as absent (logged), and an unreadable
+            or non-UTF-8 ``work_plan.md`` makes the folder malformed (skipped, logged
+            WARNING).
         """
         plans: list[Plan] = []
         branch_list = [
@@ -1537,7 +1548,7 @@ class RoadmapDevWorkflow:
                 if not segments or segments[0] != "planning" or ARCHIVED_SEGMENT in segments:
                     continue  # discover_plans re-checks; this just avoids wasted file reads
                 try:
-                    work_plan_text = self._git.show_file(clone, ref, path)
+                    work_plan_bytes = self._git.show_file_bytes(clone, ref, path)
                 except GitError as exc:
                     ctx.logger.warning(
                         "roadmap-dev: cannot read %s@%s — treating folder as malformed: %s",
@@ -1545,14 +1556,27 @@ class RoadmapDevWorkflow:
                         ref,
                         exc,
                     )
-                    work_plan_text = None
-                file_texts: dict[str, str] = {}
+                    work_plan_bytes = None
+                work_plan_text: str | None
+                if work_plan_bytes is None:
+                    work_plan_text = None  # unreadable work_plan.md ⇒ malformed
+                else:
+                    try:
+                        work_plan_text = work_plan_bytes.decode("utf-8")
+                    except UnicodeDecodeError:
+                        ctx.logger.warning(
+                            "roadmap-dev: %s@%s is not valid UTF-8 — treating folder as malformed",
+                            path,
+                            ref,
+                        )
+                        work_plan_text = None
+                file_contents: dict[str, bytes] = {}
                 prefix = folder + "/"
                 for f in files:
                     if not f.startswith(prefix):
                         continue
                     try:
-                        file_texts[f[len(prefix) :]] = self._git.show_file(clone, ref, f)
+                        file_contents[f[len(prefix) :]] = self._git.show_file_bytes(clone, ref, f)
                     except GitError as exc:
                         ctx.logger.warning(
                             "roadmap-dev: cannot read %s@%s — treating file as absent: %s",
@@ -1561,7 +1585,9 @@ class RoadmapDevWorkflow:
                             exc,
                         )
                 entries.append(
-                    PlanEntry(dir=folder, work_plan_text=work_plan_text, file_texts=file_texts)
+                    PlanEntry(
+                        dir=folder, work_plan_text=work_plan_text, file_contents=file_contents
+                    )
                 )
             plans.extend(discover_plans(repo, branch, entries))
         return plans

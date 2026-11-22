@@ -505,12 +505,13 @@ def _identities_for(paths: dict[str, str], repo: str = FIX, branch: str = "main"
     """Compute the scanned identity for each ``{topic: work_plan text}`` plan.
 
     The scan hashes ONLY ``work_plan.md`` here (each fixture folder carries exactly
-    that one file), and :meth:`Git.show_file` rstrips the trailing newline(s) — so the
-    hash input is ``text.rstrip("\\n")`` (exactly what ``_scan_repo`` feeds the hash).
+    that one file), and :meth:`Git.show_file_bytes` returns the exact blob bytes
+    (no decode, no rstrip) — so the hash input is ``text.encode("utf-8")`` (exactly
+    what ``_scan_repo`` feeds the hash).
     """
     out = {}
     for topic, text in paths.items():
-        h = plan_folder_hash({"work_plan.md": text.rstrip("\n")})
+        h = plan_folder_hash({"work_plan.md": text.encode("utf-8")})
         plan = Plan(repo, branch, f"planning/{topic}/work_plan.md", "", h)
         out[topic] = plan.identity
     return out
@@ -1014,8 +1015,8 @@ def test_ac7_crash_reaper_restarts_at_next_attempt(base_config: Config, tmp_path
     clock = Clock(DAY_1200)
 
     # Seed the "crashed" world: a pending entry (attempt 2) + a leaked worktree dir.
-    # (show_file rstrips the trailing newline — mirror the scan's hash input.)
-    h = plan_folder_hash({"work_plan.md": ORBIT_PLAN.rstrip("\n")})
+    # (show_file_bytes returns exact blob bytes — mirror the scan's hash input.)
+    h = plan_folder_hash({"work_plan.md": ORBIT_PLAN.encode("utf-8")})
     plan = Plan(FIX, "main", ORBIT_PLAN_PATH, "ORBIT sim extension", h)
     ident = plan.identity
     entry = make_plan_entry(

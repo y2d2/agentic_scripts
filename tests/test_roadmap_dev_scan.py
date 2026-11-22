@@ -28,7 +28,7 @@ from agentic_scripts.config import Config, RoadmapPrompts
 from agentic_scripts.git import Git, GitError
 from agentic_scripts.state import StateStore
 from agentic_scripts.workflows.base import WorkContext
-from agentic_scripts.workflows.roadmap_dev import RoadmapDevWorkflow
+from agentic_scripts.workflows.roadmap_dev import RoadmapDevWorkflow, plan_folder_hash
 
 # The injected clock (UTC) — the pipeline never calls datetime.now() itself.
 NOW = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
@@ -46,6 +46,9 @@ UNITEST_PLAN = "# Unit tests\n\nAdd unit tests for the core modules.\n"
 DONE_PLAN = "# Done plan\n\nAlready archived; must never be discovered.\n"
 BROKEN_README = "# broken folder\n\nThis folder has no work_plan.md (malformed).\n"
 IGNORED_PLAN = "# Ignored plan\n\nOn a roadmap-dev/* branch; must never be discovered.\n"
+BINPLAN_PLAN = "# Binary plan\n\nFolder with a binary asset.\n"
+BIN_BLOB = b"\xcb\x23\x00\x01"  # non-UTF-8 bytes (a committed binary asset)
+BADWP_BYTES = b"\xcb# not utf8\n"  # invalid UTF-8 as a work_plan.md
 
 LISTING_HEADER = "| approval | priority | plan | title | state | remove |"
 LISTING_SEP = "|----------|----------|------|-------|-------|--------|"
@@ -96,6 +99,12 @@ def _write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` (creating parents)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    """Write raw ``data`` to ``path`` (creating parents) — for binary fixture files."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
 
 
 def _commit(src: Path, message: str) -> None:
@@ -172,6 +181,50 @@ def _make_simple_remote(tmp_path: Path) -> Path:
     _write(src / "planning/netfit/work_plan.md", "# Netfit\n\nTune the network model.\n")
     _commit(src, "add plan")
     return _push_bare(src, tmp_path / "other.git")
+
+
+def _make_binplan_remote(tmp_path: Path) -> Path:
+    """Build a repo whose ``main`` carries a binary-asset plan folder, as a bare remote.
+
+    Purpose:
+        The T6d fixture: ``planning/binplan/`` holds a valid ``work_plan.md`` (plain
+        text) plus a binary ``data/blob.bin`` (``b"\\xcb\\x23\\x00\\x01"`` — non-UTF-8)
+        — exactly the shape that crashed the first live scan run.
+
+    Args:
+        tmp_path: The pytest temp dir (sources + bare live under it).
+
+    Returns:
+        The bare remote path (the clone URL in the config).
+    """
+    src = tmp_path / "binplan-src"
+    src.mkdir()
+    _git(src, "init", "-b", "main")
+    _write(src / "README.md", "# binplan\n")
+    _commit(src, "base")
+    _write(src / "planning/binplan/work_plan.md", BINPLAN_PLAN)
+    _write_bytes(src / "planning/binplan/data/blob.bin", BIN_BLOB)
+    _commit(src, "add plan with binary asset")
+    return _push_bare(src, tmp_path / "binplan.git")
+
+
+def _make_badwp_remote(tmp_path: Path) -> Path:
+    """Build a repo whose ``main`` carries a non-UTF-8 ``work_plan.md``, as a bare.
+
+    Args:
+        tmp_path: The pytest temp dir (sources + bare live under it).
+
+    Returns:
+        The bare remote path (the clone URL in the config).
+    """
+    src = tmp_path / "badwp-src"
+    src.mkdir()
+    _git(src, "init", "-b", "main")
+    _write(src / "README.md", "# badwp\n")
+    _commit(src, "base")
+    _write_bytes(src / "planning/badwp/work_plan.md", BADWP_BYTES)
+    _commit(src, "add non-UTF-8 work_plan.md")
+    return _push_bare(src, tmp_path / "badwp.git")
 
 
 def _make_prompts_remote(tmp_path: Path, listing: str = "") -> Path:
@@ -308,13 +361,21 @@ def _config(
     return dataclasses.replace(base_config, roadmap_prompts=rp)
 
 
-def _ctx(config: Config, state_dir: Path, *, gate_open: bool = False) -> WorkContext:
+def _ctx(
+    config: Config,
+    state_dir: Path,
+    *,
+    gate_open: bool = False,
+    logger: logging.Logger | None = None,
+) -> WorkContext:
     """Build a hermetic :class:`WorkContext` over the tmp workspace (quiet logger).
 
     Args:
         config: A loaded :class:`Config` whose paths point at the tmp workspace.
         state_dir: The state directory (``<tmp>/state``; the sandbox is ``<tmp>/sandbox``).
         gate_open: The idle-gate verdict for this fire (False → the closed-gate drain note).
+        logger: The embedded logger (defaults to the module's quiet ``QUIET`` logger;
+            tests asserting on log output pass their own logger).
 
     Returns:
         A fully wired :class:`WorkContext` (``run_id="test-run"``, ``admin_repo=None``).
@@ -322,7 +383,7 @@ def _ctx(config: Config, state_dir: Path, *, gate_open: bool = False) -> WorkCon
     return WorkContext(
         config=config,
         state=StateStore(state_dir),
-        logger=QUIET,
+        logger=logger or QUIET,
         run_id="test-run",
         workflow_name="roadmap-dev",
         sandbox_dir=state_dir.parent / "sandbox",
@@ -770,3 +831,76 @@ def test_prompts_push_retry_exhausted_records_error_keeps_state(
     log = _remote_log(bare_p)
     assert log[0] == "user-approve"
     assert log[1] == "OC: roadmap-dev: reconcile listing (run test-run)"
+
+
+# --- T6d: binary-safe scan ------------------------------------------------------ #
+
+
+def test_scan_binary_asset_folder_is_discovered_and_hash_is_stable(
+    base_config: Config, tmp_path: Path
+) -> None:
+    """[T6d] A plan folder with a binary asset (b"\\xcb\\x23\\x00\\x01") → the scan does
+    NOT raise (the old text-mode read escaped the run with UnicodeDecodeError),
+    discovers exactly one plan for the folder, and the content_hash equals the
+    independently computed raw-byte hash and is identical across two scan passes."""
+    bare_a = _make_binplan_remote(tmp_path)
+    bare_p = _make_prompts_remote(tmp_path)
+    config = _config(
+        base_config,
+        allowed_repos=[FIXTURE_REPO],
+        repo_urls={FIXTURE_REPO: str(bare_a)},
+        listing_repo_url=str(bare_p),
+    )
+    ctx = _ctx(config, tmp_path / "state")
+
+    r1 = _wf(config).run(ctx)
+    assert r1.status == "ok"
+    assert r1.errors == []
+    assert r1.items_found == 1  # exactly one plan, for the binary-asset folder
+
+    st1 = _state(ctx)
+    entry = next(e for e in st1["plans"].values() if e["path"] == "planning/binplan/work_plan.md")
+    # Expected hash: exact blob bytes (no decode, no rstrip), NUL-separated formula.
+    expected_hash = plan_folder_hash(
+        {"work_plan.md": BINPLAN_PLAN.encode("utf-8"), "data/blob.bin": BIN_BLOB}
+    )
+    assert entry["content_hash"] == expected_hash
+
+    # Second scan pass: the content_hash is identical (stable across runs).
+    r2 = _wf(config).run(ctx)
+    assert r2.status == "ok"
+    assert r2.items_found == 1
+    assert _state(ctx)["plans"][entry["identity"]]["content_hash"] == expected_hash
+
+
+def test_scan_non_utf8_work_plan_is_skipped_with_warning(
+    base_config: Config, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[T6d] A ``work_plan.md`` whose bytes are not valid UTF-8 → the scan does NOT
+    raise, the folder is skipped as malformed (no plan, no state entry), and a WARNING
+    is logged."""
+    bare_a = _make_badwp_remote(tmp_path)
+    bare_p = _make_prompts_remote(tmp_path)
+    config = _config(
+        base_config,
+        allowed_repos=[FIXTURE_REPO],
+        repo_urls={FIXTURE_REPO: str(bare_a)},
+        listing_repo_url=str(bare_p),
+    )
+    logger = logging.getLogger("test.roadmap_dev_scan.badwp")
+    logger.setLevel(logging.WARNING)
+    ctx = _ctx(config, tmp_path / "state", logger=logger)
+
+    with caplog.at_level(logging.WARNING, logger="test.roadmap_dev_scan.badwp"):
+        result = _wf(config).run(ctx)
+
+    assert result.status == "ok"
+    assert result.errors == []
+    assert result.items_found == 0
+    assert not _state(ctx).get("plans")  # the folder was skipped; no state entry
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == "test.roadmap_dev_scan.badwp"
+    ]
+    assert any("treating folder as malformed" in m for m in warnings)

@@ -5,9 +5,9 @@ from arguments.
 Purpose:
     Wrap the exact set of git operations the OC-todo, mail-keeper, and roadmap-dev
     workflows need — repo detection, branch/ref resolution, clone/fetch, remote branch
-    listing, tree listing, worktree add/remove, staged adds, tracked renames, branch
-    re-point checkouts, idempotent commits, and push — as small, explicit subprocess
-    calls with bounded timeouts.
+    listing, tree listing, single-file reads (text and binary), worktree add/remove,
+    staged adds, tracked renames, branch re-point checkouts, idempotent commits, and
+    push — as small, explicit subprocess calls with bounded timeouts.
 
 Rationale:
     Workflows must report git failures with context (the stderr tail) instead of bare
@@ -46,8 +46,9 @@ class Git:
     """Thin wrapper around git subprocess calls for workflow plumbing.
 
     Every method shells out with ``subprocess.run([...], capture_output=True,
-    text=True, timeout=...)`` and raises :class:`GitError` on non-zero exit. Timeouts:
-    300s for clone/fetch/push (network-bound), 60s for local operations.
+    text=True, timeout=...)`` (or ``text=False`` for the binary-safe
+    :meth:`show_file_bytes` read) and raises :class:`GitError` on non-zero exit.
+    Timeouts: 300s for clone/fetch/push (network-bound), 60s for local operations.
 
     Note:
         This class holds no state; it is safe to share across workflows. It performs
@@ -64,7 +65,8 @@ class Git:
         *,
         timeout: int,
         env: dict[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+        binary: bool = False,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         """Run one git command and raise GitError on non-zero exit or timeout.
 
         Args:
@@ -74,9 +76,14 @@ class Git:
             env: Optional environment for the child process; None inherits the current
                 environment (the default). Callers pass a merged dict to inject auth
                 config without putting secrets in argv.
+            binary: When True, capture stdout/stderr as raw bytes (``text=False``) —
+                the binary-safe path for :meth:`show_file_bytes`, where decoding the
+                blob as text would raise ``UnicodeDecodeError`` on non-UTF-8 content.
+                The default (False) decodes as text.
 
         Returns:
-            The completed process (stdout/stderr captured as text).
+            The completed process (stdout/stderr captured as text, or raw bytes when
+            ``binary``).
 
         Raises:
             GitError: If the command exits non-zero or exceeds ``timeout``; the message
@@ -84,22 +91,34 @@ class Git:
         """
         try:
             return subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout, check=False, env=env
+                argv,
+                capture_output=True,
+                text=not binary,
+                timeout=timeout,
+                check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise GitError(
                 f"{op} failed (exit {exc.returncode}): timed out after {timeout}s"
             ) from exc
 
-    def _check(self, op: str, proc: subprocess.CompletedProcess[str]) -> None:
+    def _check(
+        self, op: str, proc: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]
+    ) -> None:
         """Raise GitError with a stderr tail when ``proc`` exited non-zero.
 
         Args:
             op: The operation name for the error message.
-            proc: The completed process to inspect.
+            proc: The completed process to inspect (text or binary capture).
         """
         if proc.returncode != 0:
-            tail = "\n".join(proc.stderr.strip().splitlines()[-40:])
+            stderr = (
+                proc.stderr
+                if isinstance(proc.stderr, str)
+                else proc.stderr.decode("utf-8", "replace")
+            )
+            tail = "\n".join(stderr.strip().splitlines()[-40:])
             raise GitError(f"{op} failed (exit {proc.returncode}): {tail}")
 
     def is_repo(self, path: Path) -> bool:
@@ -536,6 +555,51 @@ class Git:
         )
         self._check("show_file", proc)
         return proc.stdout.rstrip("\n")
+
+    def show_file_bytes(self, repo: Path, ref: str, path: str) -> bytes:
+        """Return the raw bytes of ``path`` as it exists at ``ref`` (binary-safe).
+
+        Purpose:
+            Binary-safe single-file read from an arbitrary revision without checking it
+            out — the roadmap-dev scanner uses this to hash plan folders, which may
+            contain binary assets (images, committed build artifacts) that would crash
+            a text-mode read: with ``text=True``, ``git show`` of a non-UTF-8 blob
+            raises ``UnicodeDecodeError`` on stdout decoding, which is NOT a
+            :class:`GitError` and escapes the scanner's defensive handlers.
+
+        Rationale:
+            The identical ``git -C <repo> show <ref>:<path>`` argv as :meth:`show_file`
+            with ``text=False``, so the returned bytes are exactly the blob bytes —
+            ``git show`` emits the blob verbatim (no trailing-newline rstrip; a blob's
+            trailing newlines are content). Same local timeout and :class:`GitError`
+            handling as every other method here.
+
+        Note:
+            :meth:`show_file` remains the text form for text-only consumers (the
+            roadmap-dev listing file, the OC-todo marker context window), whose trailing
+            newlines are stripped; use :meth:`show_file_bytes` whenever the content may
+            not be valid UTF-8.
+
+        Args:
+            repo: A path inside the repository to run in.
+            ref: The revision to read from (e.g. ``"origin/dev"``).
+            path: The file path relative to the repository root.
+
+        Returns:
+            The exact blob bytes (no decoding, no stripping).
+
+        Raises:
+            GitError: If the path does not exist at ``ref`` (or ``ref`` is bad) — git's
+                stderr tail names the missing path.
+        """
+        proc = self._run(
+            "show_file_bytes",
+            ["git", "-C", str(repo), "show", f"{ref}:{path}"],
+            timeout=self._TIMEOUT_LOCAL,
+            binary=True,
+        )
+        self._check("show_file_bytes", proc)
+        return proc.stdout
 
     def delete_branch(self, path: Path, branch: str, *, force: bool = True) -> None:
         """Delete the local branch ``branch`` in the repo at ``path``.

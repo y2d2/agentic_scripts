@@ -136,20 +136,20 @@ def _state_doc(*entries: dict) -> dict:
 
 def test_plan_folder_hash_ignores_diagnostics() -> None:
     """Diagnostics (questions.md/failure.md) never change the hash; any other file does."""
-    base = {"work_plan.md": "# T\n", "work_plan_task_1_core.md": "task one\n"}
+    base = {"work_plan.md": b"# T\n", "work_plan_task_1_core.md": b"task one\n"}
     h_base = plan_folder_hash(base)
     assert len(h_base) == 64
 
     # Adding and editing diagnostic files must NOT change the hash.
-    h_added = plan_folder_hash({**base, "questions.md": "1. what?\n"})
+    h_added = plan_folder_hash({**base, "questions.md": b"1. what?\n"})
     h_edited = plan_folder_hash(
-        {**base, "failure.md": "boom\n", "questions.md": "1. what? (edited)\n"}
+        {**base, "failure.md": b"boom\n", "questions.md": b"1. what? (edited)\n"}
     )
     assert h_base == h_added == h_edited
 
     # Any change to a non-diagnostic file DOES change the hash.
-    assert plan_folder_hash({**base, "work_plan.md": "# T2\n"}) != h_base
-    assert plan_folder_hash({**base, "new_task.md": "x\n"}) != h_base
+    assert plan_folder_hash({**base, "work_plan.md": b"# T2\n"}) != h_base
+    assert plan_folder_hash({**base, "new_task.md": b"x\n"}) != h_base
 
     # Deterministic across dict orderings.
     reversed_ = dict(reversed(list(base.items())))
@@ -157,11 +157,36 @@ def test_plan_folder_hash_ignores_diagnostics() -> None:
 
     # A diagnostics-only folder hashes to the empty string's digest.
     assert (
-        plan_folder_hash({"questions.md": "q\n", "failure.md": "f\n"})
+        plan_folder_hash({"questions.md": b"q\n", "failure.md": b"f\n"})
         == hashlib.sha256(b"").hexdigest()
     )
     # The diagnostic set is exactly the two workflow-written files.
     assert DIAGNOSTIC_FILES == frozenset({"questions.md", "failure.md"})
+
+
+def test_plan_folder_hash_binary_bytes_are_byte_stable() -> None:
+    """Binary bytes hash byte-stably: raw bytes (no decode, no rstrip), NUL-separated
+    sorted pairs — the T6d regression for plan folders with binary assets."""
+    wp = b"# A\n"
+    blob = b"\xcb\x0d\x00\x00\x00\x00\x00\x00\x00"
+    contents = {"work_plan.md": wp, "data/blob.bin": blob}
+
+    # The expected digest from the documented formula: sorted (relpath, bytes) pairs,
+    # each contributing relpath.utf8 + NUL + raw bytes + NUL (no diagnostics here).
+    # "data/blob.bin" sorts before "work_plan.md", so its contribution is first.
+    expected = hashlib.sha256(
+        b"data/blob.bin" + b"\0" + blob + b"\0" + b"work_plan.md" + b"\0" + wp + b"\0"
+    ).hexdigest()
+
+    h = plan_folder_hash(contents)
+    assert h == expected
+    assert len(h) == 64
+    int(h, 16)  # 64-char hex
+
+    # Byte-stable: identical bytes in any dict ordering → identical digest.
+    assert plan_folder_hash(dict(reversed(list(contents.items())))) == h
+    # The binary entry contributes: the combined folder ≠ the text-only folder.
+    assert h != plan_folder_hash({"work_plan.md": wp})
 
 
 def test_plan_identity_hex_stable_distinct() -> None:
@@ -204,19 +229,19 @@ def test_discover_plans_filters_sorts_and_stamps() -> None:
     """discover_plans keeps valid planning/ folders, drops malformed/archived, sorts by dir."""
     entries = [
         PlanEntry(
-            dir="planning/zeta", work_plan_text="# Z\n", file_texts={"work_plan.md": "# Z\n"}
+            dir="planning/zeta", work_plan_text="# Z\n", file_contents={"work_plan.md": b"# Z\n"}
         ),
-        PlanEntry(dir="planning/alpha", work_plan_text=None, file_texts={}),  # malformed
+        PlanEntry(dir="planning/alpha", work_plan_text=None, file_contents={}),  # malformed
         PlanEntry(  # archived (an 'archived' path segment) → dropped
-            dir=f"planning/{ARCHIVED_SEGMENT}/orbit", work_plan_text="# A\n", file_texts={}
+            dir=f"planning/{ARCHIVED_SEGMENT}/orbit", work_plan_text="# A\n", file_contents={}
         ),
         PlanEntry(
-            dir="docs/plans/orbit", work_plan_text="# D\n", file_texts={}
+            dir="docs/plans/orbit", work_plan_text="# D\n", file_contents={}
         ),  # not under planning/
         PlanEntry(
             dir="planning/alpha2",
             work_plan_text="# Alpha\n",
-            file_texts={"work_plan.md": "# Alpha\n", "questions.md": "stale\n"},
+            file_contents={"work_plan.md": b"# Alpha\n", "questions.md": b"stale\n"},
         ),
     ]
     plans = discover_plans("o/r", "main", entries)
@@ -229,7 +254,7 @@ def test_discover_plans_filters_sorts_and_stamps() -> None:
     assert alpha.title == "Alpha"
     assert alpha.topic == "planning/alpha2"
     # The content hash excludes the diagnostic file.
-    assert alpha.content_hash == plan_folder_hash({"work_plan.md": "# Alpha\n"})
+    assert alpha.content_hash == plan_folder_hash({"work_plan.md": b"# Alpha\n"})
     assert alpha.identity == plan_identity("o/r", "main", alpha.path, alpha.content_hash)
 
 
