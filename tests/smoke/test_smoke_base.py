@@ -45,6 +45,8 @@ def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: P
         "log_dir": str(log_dir),
         "sandbox_dir": str(sandbox_dir),
     }
+    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
+    data["roadmap_prompts"]["allowed_repos"] = []
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return cfg_path

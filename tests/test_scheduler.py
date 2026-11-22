@@ -57,6 +57,8 @@ def _write_config(
         "log_dir": str(log_dir),
         "sandbox_dir": str(sandbox_dir),
     }
+    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
+    data["roadmap_prompts"]["allowed_repos"] = []
     if workflows is not None:
         data["workflows"] = workflows
     if extra_machine is not None:

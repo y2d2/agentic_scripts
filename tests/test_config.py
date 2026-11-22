@@ -248,8 +248,8 @@ def test_roadmap_prompts_absent_defaults(tmp_path: Path) -> None:
 def test_roadmap_prompts_shipped_loads(project_root: Path) -> None:
     """The shipped config loads with the roadmap-dev entry and the roadmap_prompts section.
 
-    Task 6 ships the entry enabled but INERT (empty allowlist = no-op until the operator
-    lists repos) — the shipped value is ``enabled: true``.
+    Task 6 ships the entry enabled; the post-bootstrap operator step seeds the 9 real
+    repos into ``allowed_repos`` — the shipped value is ``enabled: true``.
     """
     cfg = load_config(project_root / "config" / "workflows.yaml")
 
@@ -258,7 +258,17 @@ def test_roadmap_prompts_shipped_loads(project_root: Path) -> None:
     assert entry.gate == "idle"
     assert entry.agent == "planner-enhanced"
 
-    assert cfg.roadmap_prompts.allowed_repos == []
+    assert cfg.roadmap_prompts.allowed_repos == [
+        "y2d2/ARP_MPE",
+        "y2d2/ARP_implementations",
+        "y2d2/ARP_1A_anchored_implementations",
+        "y2d2/ARP_utility_code",
+        "y2d2/PRP_ARP_M",
+        "y2d2/ARP_IMU",
+        "y2d2/agentic_scripts",
+        "y2d2/ARP_roadmap",
+        "y2d2/ARP_engine",
+    ]
     assert cfg.roadmap_prompts.listing_repo == "y2d2/autonomous_task_overview"
     assert cfg.roadmap_prompts.listing_repo_url == ""
     assert cfg.roadmap_prompts.listing_path == "plans.md"

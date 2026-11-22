@@ -62,6 +62,8 @@ def base_config(tmp_path: Path, tmp_workspace: dict[str, Path]) -> Config:
         "log_dir": str(tmp_workspace["logs"]),
         "sandbox_dir": str(tmp_workspace["sandbox"]),
     }
+    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
+    data["roadmap_prompts"]["allowed_repos"] = []
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return load_config(cfg_path)

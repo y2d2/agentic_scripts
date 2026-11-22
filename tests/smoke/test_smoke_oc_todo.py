@@ -53,6 +53,8 @@ def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: P
         "log_dir": str(log_dir),
         "sandbox_dir": str(sandbox_dir),
     }
+    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
+    data["roadmap_prompts"]["allowed_repos"] = []
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return cfg_path
@@ -173,6 +175,8 @@ def test_smoke_oc_todo_config_fault(tmp_path: Path, capsys: pytest.CaptureFixtur
         "log_dir": str(dirs["logs"]),
         "sandbox_dir": str(dirs["sandbox"]),
     }
+    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
+    data["roadmap_prompts"]["allowed_repos"] = []
     data["oc_todo"]["repos"] = ["no-slash"]  # not an owner/name id → config fault
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
@@ -196,6 +200,8 @@ def test_smoke_oc_todo_empty_repo_list_no_agent(tmp_path: Path) -> None:
         "log_dir": str(dirs["logs"]),
         "sandbox_dir": str(dirs["sandbox"]),
     }
+    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
+    data["roadmap_prompts"]["allowed_repos"] = []
     data["oc_todo"]["repos"] = []  # explicit empty list (the shipped value, made explicit)
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
