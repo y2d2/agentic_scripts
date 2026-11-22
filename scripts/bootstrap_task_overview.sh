@@ -5,9 +5,11 @@
 # content (this repo's autonomous_task_overview/README.md + plans.md) to the
 # listing repo (default y2d2/autonomous_task_overview — must exist and be empty),
 # and — with --vault <path> — wires the listing into the vault as the
-# `autonomous_task_overview/` submodule: committing ONLY .gitmodules + the
-# submodule path, and REFUSING (exit 1) if the vault has any uncommitted change
-# outside those two paths (never sweeps the vault's other work into the commit).
+# `autonomous_task_overview/` submodule: the vault commit stages ONLY .gitmodules
+# + the submodule path, so the vault's other uncommitted work can never be swept
+# in; the step REFUSES (exit 1) only on uncommitted changes ON .gitmodules or
+# INSIDE autonomous_task_overview (in-progress work on the staged paths would
+# land in the submodule commit — commit or stash it first).
 #
 # Idempotent: a populated remote skips the initial push; an already-added
 # submodule skips the vault step. --dry-run prints the planned actions and
@@ -47,7 +49,8 @@ GitHub REST, no PAT, no curl):
   --repo R         listing repo to bootstrap (default: y2d2/autonomous_task_overview)
   --vault PATH     also add the listing as the `autonomous_task_overview/` submodule
                    of the git repo at PATH (commits only .gitmodules + the submodule
-                   path; refuses on any other uncommitted vault change)
+                   path; refuses only on uncommitted changes ON those two paths —
+                   the only work that could be swept into the submodule commit)
   -h, --help       this help
 EOF
 }
@@ -145,18 +148,19 @@ push_initial() {
 }
 
 # --- 3. vault submodule (optional) -------------------------------------------------
-# Echo one porcelain status line per uncommitted vault change OUTSIDE the two paths
-# the submodule step is allowed to commit (.gitmodules, autonomous_task_overview).
-vault_unrelated_change() {
+# Echo one porcelain status line per uncommitted vault change ON the two paths the
+# submodule commit stages (.gitmodules) or INSIDE the submodule path
+# (autonomous_task_overview) — the only in-progress work that could be swept into
+# the commit; uncommitted changes anywhere else are deliberately left alone.
+vault_staged_path_change() {
     local line path
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         path="${line:3}"
         path="${path%/}"
         case "$path" in
-            .gitmodules | autonomous_task_overview | autonomous_task_overview/*) continue ;;
+            .gitmodules | autonomous_task_overview | autonomous_task_overview/*) printf '%s\n' "$line" ;;
         esac
-        printf '%s\n' "$line"
     done < <(git -C "$1" status --porcelain)
 }
 
@@ -183,22 +187,22 @@ add_submodule() {
         return 0
     fi
 
-    local dirty
-    dirty="$(vault_unrelated_change "$vault")"
+    local staged_change
+    staged_change="$(vault_staged_path_change "$vault")"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        if [ -n "$dirty" ]; then
-            echo "[dry-run] would REFUSE the vault step — uncommitted changes outside .gitmodules/autonomous_task_overview:"
-            printf '%s\n' "$dirty" | sed 's/^/    /'
+        if [ -n "$staged_change" ]; then
+            echo "[dry-run] would REFUSE the vault step — uncommitted changes ON .gitmodules or INSIDE autonomous_task_overview (the only paths the submodule commit stages — in-progress work there would be swept into it):"
+            printf '%s\n' "$staged_change" | sed 's/^/    /'
         else
             echo "[dry-run] would wire the vault submodule: git -C $vault submodule add $LISTING_URL autonomous_task_overview → commit (OC:) → git -C $vault push"
         fi
         return 0
     fi
 
-    if [ -n "$dirty" ]; then
-        fail "refusing the vault step: $vault has uncommitted changes outside .gitmodules/autonomous_task_overview — your work must never be swept into the submodule commit:"
-        printf '%s\n' "$dirty" | sed 's/^/    /'
+    if [ -n "$staged_change" ]; then
+        fail "refusing the vault step: $vault has uncommitted changes ON .gitmodules or INSIDE autonomous_task_overview — these are the only paths the submodule commit stages, so in-progress work there would be swept into it (commit or stash it first):"
+        printf '%s\n' "$staged_change" | sed 's/^/    /'
         exit 1
     fi
 
