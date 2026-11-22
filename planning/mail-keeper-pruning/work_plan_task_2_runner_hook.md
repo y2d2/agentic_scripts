@@ -18,6 +18,7 @@ Modify `src/agentic_scripts/workflows/mail_keeper.py` to call `prune_daily(ctx.a
       files_deleted: tuple[str, ...]
       ids_recorded: tuple[str, ...]
 
+
   def prune_daily(vault_root: Path) -> PruneSummary: ...
   ```
   Semantics: strips `- [x]` entry blocks from `<vault_root>/mail/daily/*.md`, appends pruned msg-ids (dedup'd) to `<vault_root>/mail/daily/.pruned.jsonl`, deletes day-files left with no entries, never touches old-format (checkbox-less) files, atomic writes, stdlib-only. Import it as `from agentic_scripts.mail import prune` (package style: `mail/__init__.py` currently only has a docstring — import the submodule directly: `from agentic_scripts.mail.prune import PruneSummary, prune_daily`).

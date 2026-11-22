@@ -44,7 +44,9 @@ else:
     if back_last_date < floor:
         hist_set = []  # defensive completion-skip (unchanged)
     else:
-        hist_set = [row for row in rows if back_last_date < int(row.get("timestamp", 0)) <= new_last_date]
+        hist_set = [
+            row for row in rows if back_last_date < int(row.get("timestamp", 0)) <= new_last_date
+        ]
 ```
 
 (Same shape as today, just branched on `new_last_date == 0`. The existing

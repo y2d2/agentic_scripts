@@ -44,9 +44,7 @@ ts ≥ 2026-10-19 15:04) were marked processed without completed triage.
            "agent hit its step cap (opencode exited 0 with step-exhaustion boilerplate) — "
            "treating as failure; batch re-presented next run"
        )
-       return WorkflowResult(
-           status="error", items_found=len(merged), actions=actions, errors=errors
-       )
+       return WorkflowResult(status="error", items_found=len(merged), actions=actions, errors=errors)
    ```
 
    (Place BEFORE `classes = _parse_triage_classes(...)` — i.e. at the top of the "Agent ok"

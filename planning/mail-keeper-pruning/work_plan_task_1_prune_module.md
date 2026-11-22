@@ -25,12 +25,18 @@ Create `src/agentic_scripts/mail/prune.py` exposing one entry point `prune_daily
   ```python
   from dataclasses import dataclass
 
+
   @dataclass(frozen=True)
   class PruneSummary:
-      entries_pruned: int        # checked entry blocks removed
-      files_touched: tuple[str, ...]   # day-file basenames rewritten (checked entries removed, file kept)
-      files_deleted: tuple[str, ...]   # day-file basenames deleted (emptied)
-      ids_recorded: tuple[str, ...]    # msg-ids appended to .pruned.jsonl this pass (excludes already-present ids)
+      entries_pruned: int  # checked entry blocks removed
+      files_touched: tuple[
+          str, ...
+      ]  # day-file basenames rewritten (checked entries removed, file kept)
+      files_deleted: tuple[str, ...]  # day-file basenames deleted (emptied)
+      ids_recorded: tuple[
+          str, ...
+      ]  # msg-ids appended to .pruned.jsonl this pass (excludes already-present ids)
+
 
   def prune_daily(vault_root: Path) -> PruneSummary: ...
   ```
