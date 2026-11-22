@@ -1424,9 +1424,9 @@ class RoadmapDevWorkflow:
             repo: The ``owner/name`` repo id.
 
         Returns:
-            The override string when configured, else ``"git@github.com/<repo>.git"``.
+            The override string when configured, else ``"git@github.com:<repo>.git"``.
         """
-        return self._settings.repo_urls.get(repo) or f"git@github.com/{repo}.git"
+        return self._settings.repo_urls.get(repo) or f"git@github.com:{repo}.git"
 
     def _prompts_repo_url(self) -> str:
         """Return the listing-repo clone URL (override wins over the SSH default).
@@ -1435,7 +1435,7 @@ class RoadmapDevWorkflow:
             ``listing_repo_url`` when set, else ``"git@github.com:<listing_repo>.git"``.
         """
         return (
-            self._settings.listing_repo_url or f"git@github.com/{self._settings.listing_repo}.git"
+            self._settings.listing_repo_url or f"git@github.com:{self._settings.listing_repo}.git"
         )
 
     def _clone_or_fetch(

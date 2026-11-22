@@ -932,6 +932,23 @@ def test_constructor_seams(base_config: Config) -> None:
     assert wf._now() == fixed
 
 
+def test_repo_url_default_is_ssh_colon_form(base_config: Config) -> None:
+    """_repo_url fallback (no repo_urls override) is the byte-exact SSH URL — colon, not slash."""
+    settings = _roadmap_config(base_config, ["y2d2/ARP_MPE"]).roadmap_prompts
+    wf = RoadmapDevWorkflow(settings)
+    assert wf._repo_url("y2d2/ARP_MPE") == "git@github.com:y2d2/ARP_MPE.git"
+
+
+def test_prompts_repo_url_default_is_ssh_colon_form(base_config: Config) -> None:
+    """_prompts_repo_url fallback (no listing_repo_url) is the byte-exact SSH URL — colon."""
+    settings = dataclasses.replace(
+        _roadmap_config(base_config, []).roadmap_prompts,
+        listing_repo="y2d2/autonomous_task_overview",
+    )
+    wf = RoadmapDevWorkflow(settings)
+    assert wf._prompts_repo_url() == "git@github.com:y2d2/autonomous_task_overview.git"
+
+
 def test_run_empty_allowed_repos_is_noop(base_config: Config, tmp_path: Path) -> None:
     """run with an empty allowlist → ok, the no-repos action, and NO state write."""
     # The shipped T1 config has roadmap_prompts.allowed_repos: [].
