@@ -132,7 +132,13 @@ def test_smoke_oc_todo_registered_noop(tmp_path: Path) -> None:
 
 
 def test_smoke_oc_todo_gate_closed_noop(tmp_path: Path) -> None:
-    """Gate-closed run → exit 0, CLOSED verdict, no repo touched (no sandbox dir, no state)."""
+    """Gate-closed run → exit 0, CLOSED verdict, no repo touched (no sandbox dir, no state).
+
+    With ``roadmap-dev`` shipped enabled (Task 6, ``gate: idle``), a quiet-gate-closed run
+    still enters the workflow loop: oc-todo (a quiet-gate sibling) is SKIPPED and touches
+    no repo, while the inert roadmap-dev entry no-ops — so the run ends ``overall: ok``
+    (it no longer blanket-skips to ``overall: skipped``).
+    """
     cfg, dirs = _workspace(tmp_path)
 
     code = run(
@@ -144,11 +150,13 @@ def test_smoke_oc_todo_gate_closed_noop(tmp_path: Path) -> None:
     assert code == 0
     log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
     assert "verdict=CLOSED" in log_text
+    # oc-todo is skipped by the closed quiet gate (never reaches its own no-repos path).
+    assert "WORKFLOW oc-todo status=skipped reason=quiet gate closed" in log_text
 
     last = _last_run(dirs["logs"])
-    assert "overall: skipped" in last
+    assert "overall: ok" in last
 
-    # With the gate closed, runs exit as no-ops without touching any repo.
+    # With the gate closed, oc-todo exits as a skip without touching any repo.
     assert not (dirs["sandbox"] / "oc-todo").exists()
     assert not (dirs["state"] / "oc-todo.json").exists()
 

@@ -25,7 +25,7 @@ oc_todo:
   repo_urls: {}              # optional clone-URL overrides per repo (local fixtures / mirrors)
 roadmap_prompts:
   allowed_repos: []          # GitHub repos to scan for un-archived plans ("owner/name"); empty = no-op
-  listing_repo: y2d2/ARP_prompts   # live plan listing repo ("owner/name")
+  listing_repo: y2d2/autonomous_task_overview   # live plan listing repo ("owner/name")
   listing_repo_url: ""       # clone-URL override; "" = derived git@github.com:<listing_repo>.git
   listing_path: plans.md     # listing file inside the listing repo
   listing_branch: main       # branch holding the listing
@@ -46,7 +46,7 @@ workflows:
     module: agentic_scripts.workflows.oc_todo
     agent: oc-todo-resolver
   roadmap-dev:
-    enabled: false          # flipped to true in a later task (the module lands later)
+    enabled: true           # enabled, but inert until roadmap_prompts.allowed_repos is non-empty
     module: agentic_scripts.workflows.roadmap_dev
     agent: planner-enhanced
     gate: idle              # quiet_window (default) or idle; idle = runs on every non-skipped fire,

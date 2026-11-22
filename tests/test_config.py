@@ -246,16 +246,20 @@ def test_roadmap_prompts_absent_defaults(tmp_path: Path) -> None:
 
 
 def test_roadmap_prompts_shipped_loads(project_root: Path) -> None:
-    """The shipped config loads with the roadmap-dev entry and the roadmap_prompts section."""
+    """The shipped config loads with the roadmap-dev entry and the roadmap_prompts section.
+
+    Task 6 ships the entry enabled but INERT (empty allowlist = no-op until the operator
+    lists repos) — the shipped value is ``enabled: true``.
+    """
     cfg = load_config(project_root / "config" / "workflows.yaml")
 
     entry = next(w for w in cfg.workflows if w.name == "roadmap-dev")
-    assert entry.enabled is False
+    assert entry.enabled is True
     assert entry.gate == "idle"
     assert entry.agent == "planner-enhanced"
 
     assert cfg.roadmap_prompts.allowed_repos == []
-    assert cfg.roadmap_prompts.listing_repo == "y2d2/ARP_prompts"
+    assert cfg.roadmap_prompts.listing_repo == "y2d2/autonomous_task_overview"
     assert cfg.roadmap_prompts.listing_repo_url == ""
     assert cfg.roadmap_prompts.listing_path == "plans.md"
     assert cfg.roadmap_prompts.listing_branch == "main"

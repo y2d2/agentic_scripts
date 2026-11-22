@@ -91,12 +91,19 @@ def _dir_kwargs(dirs: dict[str, Path]) -> dict[str, Path]:
 # --------------------------------------------------------------------------- #
 
 
-def test_gate_closed_noop(tmp_path: Path) -> None:
-    """1. Gate-closed no-op: out-of-window now → 0 in <5s, CLOSED log, no noop state."""
+def test_gate_closed_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """1. Gate-closed no-op: out-of-window now → 0 in <5s, CLOSED log, no noop state.
+
+    With roadmap-dev shipped enabled (Task 6), the quiet-gate-closed run also evaluates
+    the idle gate — patch the probe at the scheduler's import site (canned 0 sessions) so
+    no real OpenCode service is consulted (the established seam; see the idle-gate tests
+    below and :mod:`tests.smoke.test_smoke_roadmap_dev`).
+    """
     dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
     for d in dirs.values():
         d.mkdir(parents=True)
     cfg = _write_config(tmp_path, **_dir_kwargs(dirs))
+    monkeypatch.setattr("agentic_scripts.scheduler.read_active_sessions", lambda: 0)
 
     now = datetime(2026, 10, 20, 13, 0)  # local 13:00 — outside the window
     t0 = time.monotonic()
@@ -147,6 +154,10 @@ def test_two_step_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Point MAIL_INDEX_DB at a nonexistent tmp path so the workflow lands status=skipped
     # (index missing) — no canary walk, no agent. Mirrors Task 3b's base-smoke env isolation.
     monkeypatch.setenv("MAIL_INDEX_DB", str(tmp_path / "no-such-index"))
+    # Task 6 follow-up (additive): roadmap-dev ships enabled (idle gate) — patch the probe
+    # at the scheduler's import site (canned 0 sessions) so the non-forced runs never
+    # consult the real OpenCode service.
+    monkeypatch.setattr("agentic_scripts.scheduler.read_active_sessions", lambda: 0)
     dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
     for d in dirs.values():
         d.mkdir(parents=True)
@@ -573,34 +584,42 @@ def test_forced_run_all_run_gate_open_no_gate_state(
     assert not (dirs["state"] / "scheduler.json").exists()
 
 
-def test_only_disabled_roadmap_dev_is_clean_noop(tmp_path: Path) -> None:
-    """--only roadmap-dev while it ships disabled → not a usage error; a clean gate no-op.
+def test_only_roadmap_dev_inert_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--only roadmap-dev (shipped enabled, Task 6) → not a usage error; a clean inert no-op.
 
-    The shipped config registers roadmap-dev with enabled: false, so ``list_enabled``
-    returns no entries (no SchedulerUsageError — the name IS registered). With the quiet
-    gate closed and no selected idle-gate workflow, the run early-returns 0 as a skip.
+    The shipped config registers roadmap-dev with ``enabled: true`` and an empty
+    ``roadmap_prompts.allowed_repos``, so ``list_enabled`` returns the single entry (no
+    SchedulerUsageError — the name IS registered). With the quiet gate closed the run
+    still enters the workflow loop (a selected workflow IS idle-gate): the idle gate
+    records its 1st poll (canned probe, patched at the scheduler's import site — the
+    established seam), the inert workflow no-ops (1 action, no state), and the run
+    exits 0 as overall ok.
     """
     dirs = {n: tmp_path / n for n in ("state", "logs", "sandbox")}
     for d in dirs.values():
         d.mkdir(parents=True)
     cfg = _write_config(tmp_path, **_dir_kwargs(dirs))  # shipped workflows incl. roadmap-dev
+    monkeypatch.setattr("agentic_scripts.scheduler.read_active_sessions", lambda: 0)
 
     now = datetime(2026, 11, 20, 13, 0)  # outside the quiet window → gate closed
     code = run(
         ["run", "--only", "roadmap-dev", "--config", str(cfg)],
         now=now,
         load=(0.5, 0.5, 0.5),
-        run_id="only-disabled",
+        run_id="only-inert",
     )
 
     assert code == 0
     log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
     assert "verdict=CLOSED" in log_text
+    assert "reason=no active sessions (1st idle poll recorded)" in log_text
+    assert "WORKFLOW roadmap-dev status=ok items_found=0 actions=1 errors=0" in log_text
     last = _last_run(dirs["logs"])
-    assert "overall: skipped" in last
-    assert "workflows: -" in last
-    # No workflow ran: no roadmap-dev state. The quiet gate was evaluated (it clears
-    # its own streak), but the idle gate was NOT (early return) → no idle streak key.
+    assert "overall: ok" in last
+    assert "roadmap-dev=ok(0 items, 1 actions, 0 errors)" in last
+    # The inert workflow no-ops: no roadmap-dev state. The quiet gate was evaluated (it
+    # clears its streak to null) and the idle gate recorded its 1st poll.
     assert not (dirs["state"] / "roadmap-dev.json").exists()
     sched = json.loads((dirs["state"] / "scheduler.json").read_text(encoding="utf-8"))
-    assert "idle_gate_last_ok" not in sched
+    assert isinstance(sched.get("idle_gate_last_ok"), str)
+    assert sched.get("gate_last_ok") is None

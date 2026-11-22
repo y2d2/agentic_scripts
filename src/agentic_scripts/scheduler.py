@@ -764,9 +764,22 @@ def run(
             error_count,
             duration,
         )
+        # The last-run gate line: the quiet gate's ACTUAL verdict for a gate-triggered run
+        # (same format as the gate-closed early return), or "gate: FORCED" (None) under
+        # --force. Rendering a gate-triggered run as FORCED would corrupt the audit trail.
+        gate_line = None
+        if gate is not None:
+            gate_line = (
+                f"gate: {'OPEN' if gate.open else 'CLOSED'} now={gate.now.isoformat()} "
+                f"load1={gate.load1:.2f} threshold={config.machine.load_threshold} "
+                f"window={'open' if gate.window_open else 'closed'} "
+                f"reason={gate.reason}"
+            )
         write_last_run(
             config.paths.log_dir,
-            _last_run_lines(run_id, "force" if args.force else "gate", None, summaries, overall),
+            _last_run_lines(
+                run_id, "force" if args.force else "gate", gate_line, summaries, overall
+            ),
         )
         return 0
     finally:
