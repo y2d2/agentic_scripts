@@ -3,10 +3,11 @@
 from arguments.
 
 Purpose:
-    Wrap the exact set of git operations the OC-todo and mail-keeper workflows need —
-    repo detection, branch/ref resolution, clone/fetch, remote branch listing, worktree
-    add/remove, staged adds, idempotent commits, and push — as small, explicit
-    subprocess calls with bounded timeouts.
+    Wrap the exact set of git operations the OC-todo, mail-keeper, and roadmap-dev
+    workflows need — repo detection, branch/ref resolution, clone/fetch, remote branch
+    listing, tree listing, worktree add/remove, staged adds, tracked renames, branch
+    re-point checkouts, idempotent commits, and push — as small, explicit subprocess
+    calls with bounded timeouts.
 
 Rationale:
     Workflows must report git failures with context (the stderr tail) instead of bare
@@ -259,6 +260,42 @@ class Git:
         ]
         return sorted(names)
 
+    def ls_tree(self, repo: Path, ref: str) -> list[str]:
+        """Return the file paths in ``ref``'s tree (recursive, sorted, no directories).
+
+        Purpose:
+            The roadmap-dev scanner's primitive: enumerate every file committed on a
+            branch ref (e.g. ``"origin/dev"``) without checking it out, so candidate plan
+            folders (``planning/**/work_plan.md``) can be identified from their paths
+            alone. Runs ``git -C <repo> ls-tree -r --name-only <ref>`` — ``-r`` recurses
+            through directories and ``--name-only`` drops the mode/type/SHA columns,
+            leaving one path per file.
+
+        Rationale:
+            A local, bounded operation (no network), so it uses :attr:`_TIMEOUT_LOCAL`.
+            Unlike :meth:`grep_fixed`, there is no "no match" exit code here: an empty
+            tree (e.g. an empty commit) yields ``[]``, and a bad ref exits non-zero and
+            raises :class:`GitError`.
+
+        Args:
+            repo: A path inside the repository to run in.
+            ref: The revision to list (e.g. ``"origin/dev"``).
+
+        Returns:
+            The repo-root-relative file paths, sorted; empty for an empty tree.
+
+        Raises:
+            GitError: For a bad ref or a missing repo — the message carries git's stderr
+                tail.
+        """
+        proc = self._run(
+            "ls_tree",
+            ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", ref],
+            timeout=self._TIMEOUT_LOCAL,
+        )
+        self._check("ls_tree", proc)
+        return sorted(line for line in proc.stdout.splitlines() if line.strip())
+
     def worktree_add(self, repo: Path, worktree_path: Path, new_branch: str, ref: str) -> None:
         """Create a new worktree at ``worktree_path`` on a new branch from ``ref``.
 
@@ -312,6 +349,36 @@ class Git:
         proc = self._run("add", argv, timeout=self._TIMEOUT_LOCAL)
         self._check("add", proc)
 
+    def mv(self, path: Path, src: str, dst: str) -> None:
+        """Move a tracked path ``src`` to ``dst`` (staged) in the repo at ``path``.
+
+        Purpose:
+            The roadmap-dev archive step's primitive (Task 4): ``git -C <path> mv <src>
+            <dst>`` moves a plan folder to ``planning/archived/<topic>/`` as a staged
+            rename, so the archive commit records the move (not a delete + add) and the
+            history stays reviewable.
+
+        Rationale:
+            A local, bounded operation (no network), so it uses :attr:`_TIMEOUT_LOCAL`.
+            The rename is staged immediately (git mv stages by default) — the caller
+            commits with :meth:`commit`.
+
+        Args:
+            path: A path inside the repository (used as the ``-C`` target).
+            src: The source path (repo-root-relative, tracked).
+            dst: The destination path (repo-root-relative; its parent must exist).
+
+        Raises:
+            GitError: If ``src`` is not tracked or ``dst`` cannot be created (e.g. the
+                destination parent is missing) — the message carries git's stderr tail.
+        """
+        proc = self._run(
+            "mv",
+            ["git", "-C", str(path), "mv", src, dst],
+            timeout=self._TIMEOUT_LOCAL,
+        )
+        self._check("mv", proc)
+
     def commit(self, path: Path, message: str) -> bool:
         """Commit staged changes with ``message``; the idempotency primitive.
 
@@ -355,6 +422,41 @@ class Git:
         argv += [remote, branch]
         proc = self._run("push", argv, timeout=self._TIMEOUT_REMOTE)
         self._check("push", proc)
+
+    def checkout(self, path: Path, branch: str, ref: str | None = None) -> None:
+        """Check out ``branch``, re-pointing it to ``ref`` when given (``-B``).
+
+        Purpose:
+            Ensure a workflow-owned clone is on a specific branch: the roadmap-dev
+            prompts clone checks out the remote's default branch, and the listing may
+            live on a different one — ``checkout -B <branch> <ref>`` (e.g. ``-B main
+            origin/main``) creates or resets the local branch to ``ref`` and switches to
+            it. With ``ref=None`` a plain ``checkout -B <branch>`` simply re-selects the
+            branch (no re-point).
+
+        Rationale:
+            ``-B`` is deliberate: the prompts clone is workflow-owned (its local branches
+            are never user state), so resetting the local branch to the remote tip is the
+            standard re-point after a concurrent remote update. A plain ``checkout -b``
+            would fail when the branch already exists, and a plain ``checkout`` would
+            leave a stale local branch behind the remote.
+
+        Args:
+            path: A path inside the repository (used as the ``-C`` target).
+            branch: The branch to check out (created or reset when given a ``ref``).
+            ref: The start point to re-point ``branch`` to (e.g. ``"origin/main"``);
+                None for no re-point.
+
+        Raises:
+            GitError: If ``ref`` is bad or the checkout is impossible (e.g. local
+                uncommitted changes would be overwritten) — the message carries git's
+                stderr tail.
+        """
+        argv = ["git", "-C", str(path), "checkout", "-B", branch]
+        if ref is not None:
+            argv.append(ref)
+        proc = self._run("checkout", argv, timeout=self._TIMEOUT_LOCAL)
+        self._check("checkout", proc)
 
     def grep_fixed(
         self, repo: Path, ref: str, pattern: str, *, exclude_standard: bool = False

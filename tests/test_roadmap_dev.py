@@ -4,7 +4,8 @@ All time is injected (``NOW``); there is no git, no network, no subprocess, no r
 clock, and no filesystem access outside ``tmp_path``. Groups: (A) identity + discovery
 + state schema; (B) the ``plans.md`` listing parser/renderer (byte-stable round-trip +
 malformed input); (C) the reconciler + state machine + reaper; (D) the brief / report /
-commit renderers; (E) the workflow shell stub.
+commit renderers; (E) the workflow shell (phase 1 landed in Task 3 — its fixture-repo
+pipeline tests live in ``tests/test_roadmap_dev_scan.py``).
 """
 
 from __future__ import annotations
@@ -872,7 +873,8 @@ def test_archive_and_diag_commit_messages() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# E. Workflow shell stub
+# E. Workflow shell (phase 1 pipeline; drain stub — pipeline integration in
+#    tests/test_roadmap_dev_scan.py)
 # --------------------------------------------------------------------------- #
 
 
@@ -940,17 +942,6 @@ def test_run_empty_allowed_repos_is_noop(base_config: Config, tmp_path: Path) ->
     assert result.actions == ["no repos configured — nothing to scan"]
     assert result.errors == []
     assert not (tmp_path / "state" / "roadmap-dev.json").exists()  # no state write
-
-
-def test_run_nonempty_allowlist_reports_phase1_stub(base_config: Config, tmp_path: Path) -> None:
-    """run with an allowlist → ok + the phase-1-not-implemented action (no state save)."""
-    config = _roadmap_config(base_config, ["o/r"])
-    result = create(config).run(_ctx(config, tmp_path / "state"))
-
-    assert result.status == "ok"
-    assert result.actions == ["phase-1 not implemented (Task 3)"]
-    assert result.errors == []
-    assert not (tmp_path / "state" / "roadmap-dev.json").exists()  # the stub never saves
 
 
 def test_run_state_schema_mismatch_is_business_error(base_config: Config, tmp_path: Path) -> None:

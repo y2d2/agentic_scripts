@@ -1,6 +1,7 @@
 """The ``roadmap-dev`` workflow core: reviewed-plan identity + discovery, the ``plans.md``
 listing parser/renderer, the user-cell-preserving reconciler, the state machine + reaper,
-and the brief / commit-message renderers — the workflow shell is stubbed until Tasks 3/4.
+and the brief / commit-message renderers — the shell runs phase 1 (reaper, scan,
+reconcile, push) on every run; the idle-gated drain is stubbed until Task 4.
 
 Purpose:
     Provide every helper the roadmap-dev pipeline needs as a small, independently
@@ -14,9 +15,11 @@ Purpose:
     (:func:`reap_orphans`, :func:`apply_job_outcome`), and the renderers
     (:func:`render_brief`, :func:`job_status_from_report`, :func:`render_commit_title`,
     :func:`archive_commit_message`, :func:`diag_commit_message`). The
-    :class:`RoadmapDevWorkflow` shell (``create`` + ``run``) wires the constructor seams;
-    ``run``'s body is a phase-1 stub that Tasks 3/4 replace (scan + reconcile + push, then
-    the idle-gated drain).
+    :class:`RoadmapDevWorkflow` shell (``create`` + ``run``) wires the constructor seams
+    and implements phase 1: the run-start reaper (orphan flip + worktree cleanup), the
+    per-repo clone/fetch + all-branch scan, the listing read/reconcile/commit/push (one
+    non-fast-forward retry), and the atomic state persist; the idle-gated drain is a stub
+    until Task 4.
 
 Rationale:
     A **reviewed plan** is a folder ``planning/<topic>/work_plan.md`` (+ task files) on a
@@ -55,14 +58,17 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from agentic_scripts.config import Config, RoadmapPrompts
-from agentic_scripts.git import Git
+from agentic_scripts.git import Git, GitError
 from agentic_scripts.workflows.base import WorkflowResult
 
 # --- Constants --------------------------------------------------------------- #
@@ -1173,7 +1179,38 @@ def diag_commit_message(identity: str, kind: str, run_id: str) -> str:
     return f"OC: roadmap-dev: {identity} — {kind} (run {run_id})"
 
 
-# --- Workflow shell (stub until Tasks 3/4) ----------------------------------- #
+# --- Workflow shell ---------------------------------------------------------- #
+
+
+def clone_env_for(pat: str | None) -> dict[str, str] | None:
+    """Build the git-auth environment triple for a PAT, or None when there is no PAT.
+
+    Purpose:
+        Inject the token as an ``http.extraHeader`` via git's config env vars so the PAT
+        never appears in argv (it would otherwise show up in ``ps`` output). Kept for
+        phase 1: repos cloned over HTTPS need it, and it is harmless for the default SSH
+        URLs and for local fixture paths.
+
+    Args:
+        pat: The personal access token, or None/empty when no auth is needed (SSH / local).
+
+    Returns:
+        ``None`` when ``pat`` is None or empty; otherwise a dict with
+        ``GIT_CONFIG_COUNT=1``, ``GIT_CONFIG_KEY_0=http.extraHeader`` and
+        ``GIT_CONFIG_VALUE_0="Authorization: Bearer <pat>"``.
+
+    Note:
+        Deliberate duplicate of :func:`agentic_scripts.workflows.oc_todo.clone_env_for` —
+        there are no cross-workflow imports (each workflow module is self-contained), so
+        the small helper is copied rather than shared.
+    """
+    if not pat:
+        return None
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {pat}",
+    }
 
 
 def create(config: Config) -> "RoadmapDevWorkflow":  # noqa: UP037 - forward ref; class defined below
@@ -1206,21 +1243,30 @@ def create(config: Config) -> "RoadmapDevWorkflow":  # noqa: UP037 - forward ref
 
 
 class RoadmapDevWorkflow:
-    """The roadmap-dev workflow: one idempotent run (scan, reconcile, drain).
+    """The roadmap-dev workflow: one idempotent run (phase 1 + drain stub).
 
     Purpose:
         Hold the injected collaborators and expose the stable :attr:`name` plus
-        :meth:`run`. The run body is currently a STUB: it no-ops on an empty allowlist and
-        otherwise reports ``phase-1 not implemented (Task 3)`` — Tasks 3/4 replace
-        :meth:`_run` with the scan + reconcile + push pipeline and the idle-gated drain.
+        :meth:`run`. Phase 1 is implemented (:meth:`_scan_and_reconcile`): on every run,
+        reap orphaned ``pending`` plans (state flip + worktree cleanup), scan all
+        ``allowed_repos`` (sandbox clone/fetch, all branches except ``roadmap-dev/*``)
+        for un-archived plans, reconcile the remote ``plans.md`` in the listing-repo
+        clone, and commit + push the listing when it changed (one non-fast-forward
+        retry). The idle-gated drain is still a stub: :meth:`_run` appends the load-bearing
+        note ``"drain: not implemented (Task 4)"`` (gate open) or
+        ``"drain skipped (idle gate closed)"`` (gate closed) — Task 4 replaces that with
+        :meth:`_drain`.
 
     Rationale:
         Constructor injection (``git`` / ``runner`` / ``active_sessions`` / ``now_fn``) is
         the hermetic-test seam: tests pass fakes for each collaborator, while production
         wiring (via :func:`create`) passes the real :class:`Git` and lazily resolved
         runner/session probe/clock. The pipeline never raises for business failures —
-        faults are logged and reported in the :class:`WorkflowResult` (``status="error"``
-        when any business error accumulated).
+        per-repo and per-step faults are logged and reported in the
+        :class:`WorkflowResult` (``status="error"`` when any business error accumulated),
+        and every repo is scanned even if an earlier one failed. There is deliberately NO
+        ``github`` collaborator: this workflow never calls the GitHub API (no PR
+        creation — user decision 2026-11-21).
 
     Attributes:
         name: The stable workflow name, matching its config key (``"roadmap-dev"``).
@@ -1290,6 +1336,496 @@ class RoadmapDevWorkflow:
             return self._now_fn()
         return datetime.now(UTC)
 
+    # --- Pipeline helpers (phase 1) ------------------------------------------- #
+
+    def _repo_url(self, repo: str) -> str:
+        """Return the clone URL for ``repo`` (config override wins over the SSH default).
+
+        Purpose:
+            Resolve where an allowed repo is cloned from: an explicit ``repo_urls``
+            override (a local path or mirror — the hermetic-test seam) when present, else
+            the default SSH URL ``git@github.com:<repo>.git`` (this box authenticates via
+            SSH; the PAT env support in :meth:`_clone_or_fetch` is for HTTPS mirrors).
+
+        Args:
+            repo: The ``owner/name`` repo id.
+
+        Returns:
+            The override string when configured, else ``"git@github.com/<repo>.git"``.
+        """
+        return self._settings.repo_urls.get(repo) or f"git@github.com/{repo}.git"
+
+    def _prompts_repo_url(self) -> str:
+        """Return the listing-repo clone URL (override wins over the SSH default).
+
+        Returns:
+            ``listing_repo_url`` when set, else ``"git@github.com:<listing_repo>.git"``.
+        """
+        return (
+            self._settings.listing_repo_url or f"git@github.com/{self._settings.listing_repo}.git"
+        )
+
+    def _clone_or_fetch(
+        self, ctx, url: str, path: Path, label: str, errors: list[str]
+    ) -> Path | None:
+        """Clone from ``url`` into ``path`` on first sight, else fetch it (shared helper).
+
+        Purpose:
+            Ensure a full local clone exists at ``path`` and is current with the remote:
+            when the directory is absent (or not a git repo) it is cloned from ``url``;
+            otherwise it is fetched (with ``--prune``). A PAT, if present in the
+            environment at run time, is injected as git-auth env (never argv; harmless for
+            SSH and local URLs) — kept so repos that need HTTPS auth still work.
+
+        Args:
+            ctx: The shared context (for logging).
+            url: The clone URL (config override or the SSH default; a local path in tests).
+            path: The clone destination (the caller composes it via the layout helpers).
+            label: A human name for this clone (the repo id, or
+                ``"listing repo <owner/name>"``), used in log and error lines.
+            errors: The run's business-error list; a clone/fetch failure appends one
+                error string here (so the caller can continue with the next repo).
+
+        Returns:
+            ``path`` on success, or None on a :class:`GitError` (logged with the stderr
+            tail and recorded in ``errors``) — a clone failure never stops the other repos.
+
+        Side Effects:
+            ``mkdir -p`` of the clone's parent; one ``git clone`` or ``git fetch`` per
+            call.
+        """
+        env = clone_env_for(os.environ.get("GITHUB_PAT", "").strip() or None)
+        try:
+            if not (path.exists() and self._git.is_repo(path)):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._git.clone(url, path, env=env)
+            else:
+                self._git.fetch(path, env=env)  # prune by default
+        except GitError as exc:
+            ctx.logger.error("roadmap-dev: clone/fetch failed for %s: %s", label, exc)
+            errors.append(f"clone/fetch failed for {label}: {exc}")
+            return None
+        return path
+
+    def _scan_repo(self, ctx, repo: str, clone: Path) -> list[Plan]:
+        """Scan every remote branch of ``clone`` for reviewed plan folders.
+
+        Purpose:
+            The local full-clone scan model (oc_todo's ref-grep, adapted): for each
+            remote branch (short name — skipping ``HEAD`` / ``origin`` and the
+            workflow's own ``roadmap-dev/*`` attempt branches), list the branch's tree
+            with :meth:`Git.ls_tree`, keep the paths matching ``planning/**/work_plan.md``
+            outside an ``archived`` segment, and — per candidate folder — read
+            ``work_plan.md`` plus every file under the folder at that ref into a
+            :class:`PlanEntry`; :func:`discover_plans` then applies the pure validity
+            rules (malformed folders are skipped, never raised).
+
+        Args:
+            ctx: The shared context (for logging).
+            repo: The ``owner/name`` repo id (stored on each :class:`Plan`).
+            clone: The full-clone directory to scan.
+
+        Returns:
+            The discovered :class:`Plan` objects (deterministic — one
+            :func:`discover_plans` pass per branch, each sorted by path); empty when no
+            branch carries a plan.
+
+        Side Effects:
+            Read-only git calls (:meth:`Git.branches`, :meth:`Git.ls_tree`,
+            :meth:`Git.show_file`). A :class:`GitError` mid-branch (e.g. a vanished ref)
+            is logged and that branch skipped — the scan continues; an unreadable file
+            inside a plan folder is treated as absent (logged), and an unreadable
+            ``work_plan.md`` makes the folder malformed (skipped, logged WARNING).
+        """
+        plans: list[Plan] = []
+        branch_list = [
+            b
+            for b in self._git.branches(clone)
+            if b not in ("HEAD", "origin") and not b.startswith("roadmap-dev/")
+        ]
+        for branch in branch_list:
+            ref = f"origin/{branch}"
+            try:
+                files = self._git.ls_tree(clone, ref)
+            except GitError as exc:
+                ctx.logger.warning(
+                    "roadmap-dev: ls-tree failed on %s@%s — skipping branch: %s",
+                    repo,
+                    ref,
+                    exc,
+                )
+                continue
+            entries: list[PlanEntry] = []
+            for path in files:
+                if not path.endswith("/work_plan.md"):
+                    continue
+                folder = path[: -len("/work_plan.md")]
+                segments = folder.split("/")
+                if not segments or segments[0] != "planning" or ARCHIVED_SEGMENT in segments:
+                    continue  # discover_plans re-checks; this just avoids wasted file reads
+                try:
+                    work_plan_text = self._git.show_file(clone, ref, path)
+                except GitError as exc:
+                    ctx.logger.warning(
+                        "roadmap-dev: cannot read %s@%s — treating folder as malformed: %s",
+                        path,
+                        ref,
+                        exc,
+                    )
+                    work_plan_text = None
+                file_texts: dict[str, str] = {}
+                prefix = folder + "/"
+                for f in files:
+                    if not f.startswith(prefix):
+                        continue
+                    try:
+                        file_texts[f[len(prefix) :]] = self._git.show_file(clone, ref, f)
+                    except GitError as exc:
+                        ctx.logger.warning(
+                            "roadmap-dev: cannot read %s@%s — treating file as absent: %s",
+                            f,
+                            ref,
+                            exc,
+                        )
+                entries.append(
+                    PlanEntry(dir=folder, work_plan_text=work_plan_text, file_texts=file_texts)
+                )
+            plans.extend(discover_plans(repo, branch, entries))
+        return plans
+
+    def _fetch_listing(self, ctx, prompts_clone: Path) -> str:
+        """Return the current listing text on ``origin/<listing_branch>`` ("" when absent).
+
+        Purpose:
+            Read the live listing file at the remote tip without checking it out — the
+            base for :func:`parse_listing`. A :class:`GitError` (file or branch absent,
+            e.g. the first run before the listing branch exists) yields ``""`` (an empty
+            listing) with an INFO log — the reconciler then creates all rows from the scan.
+
+        Args:
+            ctx: The shared context (for logging).
+            prompts_clone: The listing-repo clone directory.
+
+        Returns:
+            The listing text (trailing newlines stripped by :meth:`Git.show_file`), or
+            ``""`` when the file/branch is absent.
+        """
+        settings = self._settings
+        try:
+            return self._git.show_file(
+                prompts_clone, f"origin/{settings.listing_branch}", settings.listing_path
+            )
+        except GitError as exc:
+            ctx.logger.info(
+                "roadmap-dev: no listing at %s on %s — treating as empty (first run): %s",
+                settings.listing_path,
+                settings.listing_branch,
+                exc,
+            )
+            return ""
+
+    def _reconcile_and_push(
+        self, ctx, prompts_clone: Path, plans: list[Plan], st: dict, current_md: str
+    ) -> tuple[dict, list[str], list[str]]:
+        """Reconcile the fetched listing against the scan + state and push the result.
+
+        Purpose:
+            The listing-pushing half of phase 1: parse ``current_md`` into rows, run
+            :func:`reconcile`, and — when the rendered listing differs from the fetched
+            text — ensure ``listing_branch`` is checked out (:meth:`Git.checkout` with
+            ``-B <branch> origin/<branch>`` when the clone is on another branch), write
+            the file, stage it, commit (the idempotent primitive — ``False`` means
+            no-op, skip push), and push (``--set-upstream`` only when
+            ``origin/<branch>`` is absent, probed via :meth:`Git.rev_parse`). A push
+            failure (e.g. a non-fast-forward from a concurrent user edit) triggers ONE
+            retry: fetch, re-point the branch to the remote tip, re-read the remote
+            listing, re-run :func:`reconcile` on the fresh rows (the user's cells are
+            preserved; the previous attempt's local commit is re-created on the new
+            base), re-write + commit + push. A second failure records ``listing push
+            failed for <repo>: …`` in the errors (the state document is still returned
+            for persistence — the next fire retries, and reconcile is idempotent so
+            re-applying is safe).
+
+        Args:
+            ctx: The shared context (``run_id`` in the commit message, logger).
+            prompts_clone: The listing-repo clone directory.
+            plans: The scanned plans (this run).
+            st: The current state document (the reaper's output; never mutated in place).
+            current_md: The fetched listing text ("" when the file/branch is absent).
+
+        Returns:
+            A ``(new_state, actions, errors)`` tuple — the reconciled state document
+            (from the last reconcile pass), the human-readable action notes (reconcile
+            log lines + listing push notes), and the business errors (empty when the
+            push succeeded or was not needed).
+
+        Side Effects:
+            At most two listing commits (first attempt + retry), at most two pushes, one
+            fetch per retry; the listing file is rewritten before each commit.
+
+        Raises:
+            GitError: Never from this method — commit/push faults are caught (the retry
+                then the recorded error); a :class:`GitError` from :meth:`Git.fetch` /
+                :meth:`Git.checkout` on the retry path is caught the same way.
+        """
+        settings = self._settings
+        branch = settings.listing_branch
+        commit_msg = f"OC: roadmap-dev: reconcile listing (run {ctx.run_id})"
+        actions: list[str] = []
+        errors: list[str] = []
+
+        rows = parse_listing(current_md)
+        new_rows, new_state, logs = reconcile(plans, rows, st, now=self._now())
+        actions.extend(logs)
+
+        if render_listing(new_rows) == current_md:
+            actions.append(f"listing unchanged ({len(new_rows)} row(s)) — no push")
+            return new_state, actions, errors
+
+        def commit_and_push(md: str) -> bool:
+            """Write, stage, and commit the listing; push unless the commit was a no-op.
+
+            Returns:
+                True when a push was performed, False when :meth:`Git.commit` reported
+                no changes (nothing to push — treated as a no-op success).
+
+            Raises:
+                GitError: On a commit or push failure (e.g. a non-fast-forward push).
+            """
+            target = prompts_clone / settings.listing_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(md, encoding="utf-8")
+            self._git.add(prompts_clone, [settings.listing_path])
+            if not self._git.commit(prompts_clone, commit_msg):
+                return False  # no changes → no-op, skip push
+            try:
+                self._git.rev_parse(prompts_clone, f"origin/{branch}")
+                upstream = False  # origin/<branch> exists → a plain push reaches it
+            except GitError:
+                upstream = True  # first push of the branch → set the upstream
+            self._git.push(prompts_clone, branch, upstream=upstream)
+            return True
+
+        try:
+            if branch != self._git.current_branch(prompts_clone):
+                self._git.checkout(prompts_clone, branch, ref=f"origin/{branch}")
+            pushed = commit_and_push(render_listing(new_rows))
+        except GitError as exc:
+            # ONE retry: fetch, re-point, re-read the remote listing, re-reconcile.
+            ctx.logger.warning(
+                "roadmap-dev: listing push failed for %s — one retry (re-read + re-reconcile): %s",
+                settings.listing_repo,
+                exc,
+            )
+            actions.append(
+                f"listing push conflict for {settings.listing_repo} — retrying after fetch"
+            )
+            try:
+                self._git.fetch(prompts_clone)
+                self._git.checkout(prompts_clone, branch, ref=f"origin/{branch}")
+                current_md = self._fetch_listing(ctx, prompts_clone)
+                new_rows, new_state, logs = reconcile(
+                    plans, parse_listing(current_md), new_state, now=self._now()
+                )
+                actions.extend(logs)
+                if commit_and_push(render_listing(new_rows)):
+                    actions.append(f"listing pushed to {settings.listing_repo} after retry")
+                else:
+                    actions.append(
+                        f"listing unchanged after retry ({len(new_rows)} row(s)) — no push"
+                    )
+            except GitError as exc2:
+                errors.append(f"listing push failed for {settings.listing_repo}: {exc2}")
+                ctx.logger.error(
+                    "roadmap-dev: listing push failed for %s (retry): %s",
+                    settings.listing_repo,
+                    exc2,
+                )
+        else:
+            if pushed:
+                actions.append(
+                    f"listing pushed to {settings.listing_repo} ({len(new_rows)} row(s))"
+                )
+            else:
+                actions.append(f"listing unchanged ({len(new_rows)} row(s)) — no push")
+        return new_state, actions, errors
+
+    def _reap_orphans(self, ctx, st: dict) -> tuple[dict, list[str]]:
+        """Reap orphaned ``pending`` plans at run start (state flip + worktree cleanup).
+
+        Purpose:
+            The run-start crash recovery (before any scan): every ``pending`` entry in
+            the state document belongs to a job that died with its process (crash/
+            restart/OOM) — the in-process drain is gone, so the plan is flipped back to
+            ``open`` (the pure :func:`reap_orphans`) and its leaked worktrees (execution
+            + diagnostics) are removed best-effort. The attempt counter was already
+            incremented at job start, so the fresh attempt branch name is free.
+
+        Args:
+            ctx: The shared context (sandbox root for the worktree paths, logger).
+            st: The loaded + validated state document.
+
+        Returns:
+            A ``(new_state_doc, action notes)`` tuple — the document is unchanged (the
+            same object, no log lines) when no entry is ``pending``.
+
+        Side Effects:
+            Best-effort worktree cleanup under ``<root>/wt`` and ``<root>/diag`` for each
+            reaped identity (never raises — a cleanup fault is logged, not fatal).
+        """
+        entries = st.get("plans") or {}
+        pending = [ident for ident, entry in entries.items() if entry.get("state") == "pending"]
+        if not pending:
+            return st, []
+        new_st, actions = reap_orphans(st, now=self._now())
+        root = ctx.sandbox_dir / "roadmap-dev"
+        for ident in pending:
+            repo = new_st["plans"][ident].get("repo") or ""
+            if repo:
+                clone = clone_dir(root, repo)
+                for wt in (
+                    plan_worktree_dir(root, repo, ident),
+                    diag_worktree_dir(root, repo, ident),
+                ):
+                    self._best_effort_remove_worktree(ctx, clone, wt)
+            ctx.logger.info("roadmap-dev: reaped orphan %s (pending -> open)", ident)
+        return new_st, actions
+
+    def _best_effort_remove_worktree(self, ctx, clone: Path | None, wt: Path) -> None:
+        """Remove ``wt`` from ``clone`` best-effort (never raises).
+
+        Purpose:
+            The reaper's cleanup primitive: remove a leaked worktree and, on failure,
+            fall back to a prune + ``rmtree`` so a leftover directory never bricks the
+            next attempt. The clone may be absent (the sandbox was partially deleted) —
+            then the directory is simply removed from disk.
+
+        Args:
+            ctx: The shared context (for logging).
+            clone: The full-clone repository the worktree is registered in (or None /
+                absent when the clone is gone).
+            wt: The worktree directory to remove (may already be gone).
+
+        Side Effects:
+            At most one :meth:`Git.worktree_remove` (+ a best-effort prune fallback) or
+            one ``shutil.rmtree``; the now-empty per-repo parent dir is removed when it
+            is empty (so no empty dirs remain under the sandbox).
+        """
+        if not wt.exists():
+            return
+        clone_present = clone is not None and clone.is_dir() and self._git.is_repo(clone)
+        try:
+            if clone_present:
+                self._git.worktree_remove(clone, wt, force=True)
+            else:
+                shutil.rmtree(wt, ignore_errors=True)
+        except GitError as exc:
+            ctx.logger.warning(
+                "roadmap-dev: worktree_remove failed for %s — falling back: %s", wt, exc
+            )
+            if clone_present:
+                self._prune_best_effort(ctx, clone)
+            shutil.rmtree(wt, ignore_errors=True)
+        # Remove the now-empty per-repo parent dir so no worktree dirs remain under the
+        # sandbox (a leftover empty dir would be noise).
+        parent = wt.parent
+        try:
+            if parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass  # a non-empty or vanished parent is harmless — leave it
+
+    def _prune_best_effort(self, ctx, clone: Path) -> None:
+        """Run ``git worktree prune`` best-effort (a failure is logged, never raised).
+
+        Args:
+            ctx: The shared context (for logging).
+            clone: The full-clone repository to prune.
+        """
+        try:
+            self._git.prune_worktrees(clone)
+        except GitError as exc:
+            ctx.logger.warning("roadmap-dev: worktree prune failed for %s: %s", clone, exc)
+
+    def _scan_and_reconcile(
+        self, ctx, st: dict, errors: list[str]
+    ) -> tuple[list[Plan], dict, list[str]]:
+        """Run phase 1: reap orphans, scan the allowed repos, reconcile + push the listing.
+
+        Purpose:
+            The scan/reconcile surface of one run: (1) reap orphaned ``pending`` entries
+            (state flip + worktree cleanup, before any scan); (2) clone-or-fetch every
+            allowed repo (config order) and scan all its branches for un-archived plans;
+            (3) clone-or-fetch the listing repo and hand the scan + state to
+            :meth:`_reconcile_and_push`, which reads the current ``plans.md`` from
+            ``origin/<listing_branch>``, reconciles, and commits + pushes when the
+            rendered listing changed (one non-fast-forward retry). Without a prompts
+            clone the listing push is skipped (the error was already recorded), but the
+            scan results + reconciled state still persist.
+
+        Args:
+            ctx: The shared context (sandbox, logger, run_id).
+            st: The loaded + validated state document (copy-on-write by the reaper and
+                the reconciler; the input is never mutated in place).
+            errors: The run's business-error list (appended: clone/fetch failures,
+                listing push failures) — the caller maps any entry to ``status="error"``.
+
+        Returns:
+            A ``(plans, new_state, logs)`` tuple — the scanned plans (this run's
+            ``items_found``), the reconciled state document (to be persisted when
+            changed), and the human-readable action notes (reaper + scan + reconcile log
+            lines + listing push notes + error notes).
+
+        Side Effects:
+            Clones/fetches under the sandbox; worktree cleanup for reaped orphans; at
+            most one (or two, on the retry) listing commit + push.
+        """
+        root = ctx.sandbox_dir / "roadmap-dev"
+        settings = self._settings
+        actions: list[str] = []
+
+        # --- 1. Reaper (before any scan). --- #
+        st, reaped = self._reap_orphans(ctx, st)
+        actions.extend(reaped)
+
+        # --- 2+3. Per allowed repo (config order): clone-or-fetch + scan. A repo
+        #        failure never stops the other repos. --- #
+        plans: list[Plan] = []
+        for repo in settings.allowed_repos:
+            clone = self._clone_or_fetch(
+                ctx, self._repo_url(repo), clone_dir(root, repo), repo, errors
+            )
+            if clone is None:
+                continue  # repo-level error already recorded; continue with the next repo
+            repo_plans = self._scan_repo(ctx, repo, clone)
+            plans.extend(repo_plans)
+            actions.append(f"scanned {repo}: {len(repo_plans)} plan(s)")
+            ctx.logger.info("roadmap-dev: %s — found %d plan(s)", repo, len(repo_plans))
+
+        # --- 4. Prompts clone (the listing repo). --- #
+        prompts_clone = self._clone_or_fetch(
+            ctx,
+            self._prompts_repo_url(),
+            prompts_clone_dir(root),
+            f"listing repo {settings.listing_repo}",
+            errors,
+        )
+
+        # --- 5+6. Read the current listing and reconcile (unconditionally). --- #
+        if prompts_clone is None:
+            # No listing surface: the scan + reconciled state still persist.
+            _, new_state, logs = reconcile(plans, [], st, now=self._now())
+            actions.append("listing push skipped (prompts clone unavailable)")
+            actions.extend(logs)
+        else:
+            current_md = self._fetch_listing(ctx, prompts_clone)
+            new_state, push_actions, push_errors = self._reconcile_and_push(
+                ctx, prompts_clone, plans, st, current_md
+            )
+            actions.extend(push_actions)
+            errors.extend(push_errors)
+        return plans, new_state, actions + errors
+
     # --- Run orchestration --------------------------------------------------- #
 
     def run(self, ctx) -> WorkflowResult:
@@ -1298,21 +1834,28 @@ class RoadmapDevWorkflow:
         Purpose:
             The scheduler-facing entry point: wrap :meth:`_run` and map any unexpected
             exception to ``status="error"`` (workflows never raise for business failures).
-            The current stub body: no-op on an empty allowlist, else load + validate the
-            state document and report that phase 1 is not implemented yet (Tasks 3/4
-            replace the body).
+            The run body: no-op on an empty allowlist, else load + validate the state
+            document, run phase 1 (reaper + scan + reconcile + push), append the drain
+            stub note (Task 4), and persist the state when it changed.
 
         Failure contract:
-            Business failures (e.g. a state schema mismatch) are returned as
-            ``status="error"`` with the reasons in :attr:`WorkflowResult.errors`;
-            unexpected exceptions are caught and mapped the same way (logged at ERROR).
+            Business failures (e.g. a state schema mismatch, a clone/fetch failure, a
+            listing push failure) are returned as ``status="error"`` with the reasons in
+            :attr:`WorkflowResult.errors`; unexpected exceptions are caught and mapped
+            the same way (logged at ERROR).
 
         Args:
             ctx: The shared :class:`~agentic_scripts.workflows.base.WorkContext`.
 
         Returns:
             A :class:`WorkflowResult` (``status`` one of ``"ok"`` / ``"error"``;
-            ``actions`` the side-effect notes; ``errors`` the business failures).
+            ``items_found`` the scanned plans this run; ``actions`` the side-effect
+            notes; ``errors`` the business failures).
+
+        Side Effects:
+            Clones/fetches under the sandbox, worktree cleanup for reaped orphans, at
+            most one (or two, on retry) listing commit + push, and — only when the state
+            document changed — one atomic :meth:`agentic_scripts.state.StateStore.save`.
         """
         try:
             return self._run(ctx)
@@ -1330,17 +1873,33 @@ class RoadmapDevWorkflow:
                 status="ok", items_found=0, actions=["no repos configured — nothing to scan"]
             )
 
-        # --- 2. Load + validate state. --- #
+        # --- 2. Load + validate state (a mismatch is an operator error: no side effects). --- #
         st = ctx.state.load(_STATE_KEY)
         err = validate_state(st)
         if err is not None:
             return WorkflowResult(status="error", errors=[err])
         if st == {}:
             st = fresh_state()
+        loaded_snapshot = json.dumps(st, sort_keys=True)
 
-        # --- 3. Phase 1 (scan + reconcile + push) and the drain are Tasks 3/4. --- #
+        # --- 3. Phase 1: reaper + scan + reconcile + push. --- #
+        errors: list[str] = []
+        plans, new_state, logs = self._scan_and_reconcile(ctx, st, errors)
+
+        # --- 4. Drain (stub until Task 4 — these exact notes are load-bearing for its diff). --- #
+        drain_note = (
+            "drain: not implemented (Task 4)"
+            if ctx.gate_open
+            else "drain skipped (idle gate closed)"
+        )
+
+        # --- 5. Single atomic state save, only when the document changed. --- #
+        if json.dumps(new_state, sort_keys=True) != loaded_snapshot:
+            ctx.state.save(_STATE_KEY, new_state)
+
         return WorkflowResult(
-            status="ok",
-            items_found=0,
-            actions=["phase-1 not implemented (Task 3)"],
+            status="error" if errors else "ok",
+            items_found=len(plans),
+            actions=logs + [drain_note],
+            errors=errors,
         )
