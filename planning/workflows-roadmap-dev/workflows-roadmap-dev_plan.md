@@ -55,7 +55,7 @@ The new `roadmap-dev` workflow turns this rig into an unattended plan-execution 
   | `open` | discovered, awaiting approval/execution | yes, with ☑ |
   | `pending` | job running | no |
   | `review` | major questions in `questions.md`; **checkmark removed by the workflow** (logged) | yes, once the user re-☑'s |
-  | `success` | PR opened (implementation + archived folder on `roadmap-dev/<id>-<n>`, base = plan's branch) | no; removable via remove ☑ |
+  | `success` | attempt branch pushed (implementation + archived folder on `roadmap-dev/<id>-<n>`; a human opens the PR — user decision 2026-11-21: NO PR creation by the agent) | no; removable via remove ☑ |
   | `failure` | `failure.md` (reason) on the plan's branch; plan not archived | no — re-arm = set state `open` (or edit the plan → new identity → `open`) |
 
   Timeout (8 h, configurable) → `failure`. Crash/box-restart → reaper flips orphan `pending` → `open` (infra death ≠ job failure → auto-retry next drain).
