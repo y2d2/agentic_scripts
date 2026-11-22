@@ -35,7 +35,13 @@ Rationale:
     per-repo ``#`` / per-branch ``##`` table with exactly the columns
     :data:`LISTING_COLUMNS`; the reconciler owns the ``title`` and ``state`` cells and
     preserves the user-owned ``approval`` / ``priority`` / ``remove`` cells (the one
-    sanctioned state-cell edit is re-arming a ``failure`` row to ``open``). Delivery is
+    sanctioned state-cell edit is re-arming a ``failure`` row to ``open``). Directly under
+    each data row the renderer emits one extra 6-cell **detail row**
+    (``| — | — | **Goal:** … | **Tasks:** … | — | — |``) — workflow-owned, derived from the
+    scanned plan's Purpose/Goal line and its task headings / task tables /
+    ``work_plan_task_*.md`` file names, re-stamped from the scan on every reconcile (so it
+    is always fresh), byte-stable across no-op passes, and deliberately skipped by the
+    parser (its non-numeric priority cell is the safety mechanism). Delivery is
     the pushed attempt branch — **this workflow never creates PRs and never calls the
     GitHub API** (user decision 2026-11-21: PR/merge is human-level verification; all git
     over SSH). Every function in the core is pure: no git, no network, no subprocess, and
@@ -69,7 +75,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -312,6 +318,304 @@ def extract_title(work_plan_text: str) -> str:
     return "Untitled plan"
 
 
+# --- Listing detail-row extractors (pure) --------------------------------------- #
+
+
+#: Inline goal marker: a ``**Purpose:**`` / ``**Goal:**`` line (the goal text is the
+#: line's remainder plus the wrapped continuation lines — see :func:`extract_goal`).
+_GOAL_INLINE_RE = re.compile(r"^\s*\*\*(?:Purpose|Goal):\*\*\s*(.*)$")
+
+#: Section goal marker: a ``## Purpose`` / ``## Goal`` heading (the goal text is the
+#: section body's first paragraph — see :func:`extract_goal`).
+_GOAL_SECTION_RE = re.compile(r"^##\s+(?:Purpose|Goal)\s*$")
+
+#: Tier-1 task heading: an h3 ``### Task <num>[<letter>]: <title>`` line. Requires h3 +
+#: exactly ``Task`` + a space, so ``### Tasks 8–9 …`` plural ranges, non-task h3s, and all
+#: h2 lines (``## Tasks`` / ``## Task sequence …``) never match.
+_TASK_HEADING_RE = re.compile(r"^###\s+Task\s+(\d+)([a-z])?:\s*(.+)$", re.MULTILINE)
+
+#: Trailing spec reference in a task title: a ``→`` or ``— see``/``—``/``-`` connector
+#: followed by a backticked-or-bare ``.md`` file name (covers ``lightweight-dev_task_*.md``
+#: refs too). The title is cut at the FIRST match — an internal ``→`` that does NOT lead to
+#: a ``.md`` ref (e.g. ``(user 19/11: "…"; text → speaker notes)``) never cuts.
+_TASK_REF_TAIL_RE = re.compile(r"\s+(?:→|[—–-]\s+(?:see\s+)?)[—–]?\s*`?[^`|]*\.md`?")
+
+#: A ``work_plan_task_<num>[<letter>]<_desc>.md`` file name (backticked or bare) at the
+#: START of a table-cell remainder (tier 2), with an optional em/en-dash-separated tail
+#: after it (the title when the file name is not the whole cell).
+_TASK_FILE_CELL_RE = re.compile(r"`?work_plan_task_(\d+)([a-z]?)_(.+?)\.md`?\s*(?:[—–-]\s*(.*))?$")
+
+#: A ``work_plan_task_<num>[<letter>]<_desc>.md`` file name found ANYWHERE in a string
+#: (the tier-2 any-cell fallback).
+_TASK_FILE_ANY_RE = re.compile(r"work_plan_task_(\d+)([a-z]?)_(.+?)\.md")
+
+#: A ``work_plan_task_<num>[<letter>]<_desc>.md`` file name in a file listing (tier 3),
+#: anchored on the basename so folder-relative paths (``sub/work_plan_task_1_x.md``) match
+#: too.
+_TASK_FILE_NAME_RE = re.compile(r"(?:^|/)work_plan_task_(\d+)([a-z]?)_(.+)\.md$")
+
+
+def extract_goal(work_plan_text: str) -> str:
+    """Return the plan goal text from a ``work_plan.md`` text.
+
+    Purpose:
+        The listing detail row's ``Goal`` cell is workflow-owned and comes from the plan
+        itself. First match wins: (a) an INLINE marker — the first line matching
+        ``^\\s*\\*\\*(?:Purpose|Goal):\\*\\*\\s*(.*)$``; the goal is that line's remainder
+        PLUS subsequent lines up to (not including) a blank line or a line starting with
+        ``#``, joined with single spaces and stripped; then (b) a SECTION marker — the
+        first ``## Purpose`` / ``## Goal`` heading; the goal is the first paragraph of the
+        section body (lines up to a blank line or the next ``#`` heading, joined with
+        single spaces, stripped). A plan with neither marker falls back to the em-dash
+        sentinel so the detail row always has a goal cell.
+
+    Rationale:
+        The real plans (verified 2026-11-22 across all 9 allowed repos, 77 plans) carry
+        the goal as an inline ``**Purpose:**`` line (dominant, 61 plans), a ``## Purpose``
+        section (1 plan, wrapped body), or an inline ``**Goal:**`` line (1 plan); 15 plans
+        carry neither. Continuation lines keep a wrapped goal whole; a line starting with
+        ``#`` ends the goal because from there the plan's own structure resumes.
+
+    Args:
+        work_plan_text: The full text of ``work_plan.md`` (or a str to parse defensively;
+            ``""`` → the fallback).
+
+    Returns:
+        The goal text (whitespace-normalised to single spaces, stripped), or ``"—"`` when
+        no Purpose/Goal marker exists.
+
+    Note:
+        Never raises on empty/None-ish input (``""`` → ``"—"``). A ``#`` heading mentioned
+        INSIDE the marker line (e.g. ``**Purpose:** … see ## E-mail lists …``) is part of
+        the goal and never truncates it — only a ``#`` line of its own ends the goal.
+    """
+    lines = (work_plan_text or "").splitlines()
+    # (a) Inline marker: the line's remainder plus wrapped continuation lines.
+    for i, line in enumerate(lines):
+        match = _GOAL_INLINE_RE.match(line)
+        if match:
+            parts = [match.group(1).strip()]
+            for cont in lines[i + 1 :]:
+                if not cont.strip() or cont.strip().startswith("#"):
+                    break
+                parts.append(cont.strip())
+            goal = " ".join(p for p in parts if p)
+            return goal or "—"
+    # (b) Section marker: the section body's FIRST PARAGRAPH (the blank line(s) a heading
+    # customarily carries are skipped; the paragraph ends at a blank line or ``#`` line).
+    for i, line in enumerate(lines):
+        if _GOAL_SECTION_RE.match(line):
+            parts: list[str] = []
+            started = False
+            for cont in lines[i + 1 :]:
+                stripped = cont.strip()
+                if not stripped:
+                    if started:
+                        break
+                    continue  # blank line(s) before the first paragraph
+                if stripped.startswith("#"):
+                    break
+                started = True
+                parts.append(stripped)
+            goal = " ".join(parts)
+            return goal or "—"
+    return "—"
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Split a ``| ... |`` markdown table row into stripped cells (private helper)."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [cell.strip() for cell in s.split("|")]
+
+
+def _parse_task_num(cell: str) -> tuple[int, str] | None:
+    """Parse a leading ``<num>[<letter>]`` task number from a table cell (private).
+
+    Returns:
+        The ``(int(num), letter)`` pair, or None when the cell has no leading number.
+    """
+    match = re.match(r"^(\d+)([a-z]?)\b", cell.strip())
+    if match is None:
+        return None
+    return int(match.group(1)), match.group(2)
+
+
+def _task_title_any_cell(cells: list[str], num: int, letter: str) -> str | None:
+    """Derive a title from a ``work_plan_task_<N>_*.md`` name in ANY cell of a row.
+
+    Prefers an exact label (``N`` + ``letter``) match, else any same-``N`` match (the
+    spec's "by the same N" rule). Returns the underscore-derived ``desc`` or None.
+    """
+    fallback: str | None = None
+    for cell in cells:
+        for match in _TASK_FILE_ANY_RE.finditer(cell):
+            if int(match.group(1)) != num:
+                continue
+            desc = match.group(3).replace("_", " ")
+            if match.group(2) == letter:
+                return desc  # exact label match wins immediately
+            if fallback is None:
+                fallback = desc
+    return fallback
+
+
+def _task_title_from_row(cells: list[str], task_col: int | None, num: int, letter: str) -> str:
+    """Derive one tier-2 task title from a data row's cells (private helper).
+
+    Returns:
+        The derived title, or ``""`` when nothing yields one (the row is then skipped).
+    """
+    cell = cells[task_col] if (task_col is not None and task_col < len(cells)) else ""
+    # Strip a leading "<num>[<letter>] — " prefix (a no-op when the cell is bare text).
+    rest = re.sub(r"^(\d+)([a-z]?)\s*[—–-]?\s*", "", cell).strip()
+    match = _TASK_FILE_CELL_RE.match(rest)
+    if match:
+        # The cell starts with a work_plan_task_<N>_<desc>.md name: take the
+        # em/en-dash-separated tail after it, else derive from the desc.
+        tail = (match.group(4) or "").strip()
+        return tail or match.group(3).replace("_", " ")
+    if rest:
+        # Bare text (no file name): use it as the title, with the tier-1 ref-cut.
+        cut = _TASK_REF_TAIL_RE.search(rest)
+        return (rest[: cut.start()].rstrip() if cut else rest).strip()
+    # Still empty: derive from a work_plan_task_<N>_<desc>.md in ANY cell of the row.
+    return _task_title_any_cell(cells, num, letter) or ""
+
+
+def _sort_task_pairs(pairs: dict[str, tuple[int, str, str]]) -> tuple[tuple[str, str], ...]:
+    """Sort the label-keyed ``(int_num, letter, title)`` map into ``(label, title)``.
+
+    Purpose:
+        The single deterministic ordering for every tier: by ``(int(num), letter)`` (so
+        ``work_plan_task_10_*.md`` sorts AFTER ``2``, not lexicographically before it),
+        with the label rendered as ``f"{num}{letter}"`` (e.g. ``"1"``, ``"3b"``).
+    """
+    ordered = sorted(pairs.values(), key=lambda value: (value[0], value[1]))
+    return tuple((f"{num}{letter}", title) for num, letter, title in ordered)
+
+
+def extract_task_titles(
+    work_plan_text: str, file_names: Sequence[str] = ()
+) -> tuple[tuple[str, str], ...]:
+    """Return the plan's task titles as ``(label, title)`` pairs from a work plan.
+
+    Purpose:
+        The listing detail row's ``Tasks`` cell joins the plan's task titles — the plan's
+        OWN numbering, ``label title`` pairs joined with `` · ``. Three extraction tiers,
+        the first that yields at least one pair wins:
+
+        1. **Headings** — every h3 ``### Task <num>[<letter>]: <title>`` line (requires h3
+           + exactly ``Task`` + a space, so ``### Tasks 8–9 …`` plural ranges, non-task h3s
+           like ``### Bag-reader …``, and all h2 lines never match). The title is the
+           captured text with the trailing spec reference cut off at the first ``→`` /
+           ``— see`` / ``—`` / ``-`` connector followed by a backticked-or-bare ``.md``
+           file name (covers ``lightweight-dev_task_*.md`` refs too).
+        2. **Task tables** (only when tier 1 yields nothing) — every markdown table whose
+           header row has a cell equal to ``task`` or ``#`` after ``strip().lower()`` (a
+           plan may carry several, e.g. tasks added under a later ``## Revision N``
+           section); from each data row the number under the ``#`` column when present
+           (else the leading ``<num>[<letter>]`` of the ``Task``-column cell; rows without
+           a num are skipped) and the title derived from the ``Task``-column text (a
+           leading ``<num>[<letter>] —`` prefix is stripped; a ``work_plan_task_*`` file
+           name yields its em/en-dash-separated tail or its underscore-derived ``desc``;
+           bare text is used as-is with the tier-1 ref-cut; otherwise a
+           ``work_plan_task_<N>_*.md`` name found in ANY cell of the row yields its
+           ``desc``).
+        3. **File names** (only when tiers 1–2 yield nothing) — every name in
+           ``file_names`` matching ``work_plan_task_<num>[<letter>]<_desc>.md``
+           (basename-anchored, so folder-relative paths work) → ``(label, desc)`` with
+           underscores → spaces.
+
+        Duplicates keep the first occurrence per label; the result is sorted by
+        ``(int(num), letter)``.
+
+    Args:
+        work_plan_text: The full text of ``work_plan.md`` (or a str to parse defensively).
+        file_names: The plan folder's file names (basenames or folder-relative paths —
+            tier 3 is basename-anchored; defaults to empty, i.e. tiers 1–2 only).
+
+    Returns:
+        The ``(label, title)`` pairs in task order (e.g. ``("1", "Skeleton"),
+        ("3b", "Subtask")``), or ``()`` when no tier yields a task.
+
+    Note:
+        Never raises on empty/None-ish input (``""`` → ``()``). The tier-1 ref cut is
+        best-effort: a title that legitimately embeds ``— see ``x.md``` mid-text is cut
+        there too (spec refs are not titles); an internal ``→`` that does NOT lead to a
+        ``.md`` ref never cuts.
+    """
+    text = work_plan_text or ""
+
+    # --- Tier 1: h3 task headings (the dominant form). --- #
+    pairs: dict[str, tuple[int, str, str]] = {}
+    for match in _TASK_HEADING_RE.finditer(text):
+        num, letter = int(match.group(1)), match.group(2) or ""
+        label = f"{match.group(1)}{letter}"
+        if label in pairs:
+            continue  # keep the first occurrence per label
+        title = match.group(3)
+        cut = _TASK_REF_TAIL_RE.search(title)
+        if cut:
+            title = title[: cut.start()].rstrip()
+        pairs[label] = (num, letter, title.strip())
+    if pairs:
+        return _sort_task_pairs(pairs)
+
+    # --- Tier 2: task tables (only when tier 1 yielded nothing). --- #
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
+        j = i
+        while j < n and lines[j].strip().startswith("|"):
+            j += 1
+        run = lines[i:j]
+        i = j  # skip the whole run (header + data rows)
+        if len(run) < 2:
+            continue  # a lone ``|`` line is not a table
+        header = _split_table_row(run[0])
+        task_col = next((k for k, c in enumerate(header) if c.lower() == "task"), None)
+        hash_col = next((k for k, c in enumerate(header) if c == "#"), None)
+        if task_col is None and hash_col is None:
+            continue  # not a task table
+        for row in run[1:]:
+            cells = _split_table_row(row)
+            num_cell: str | None = None
+            if hash_col is not None and hash_col < len(cells):
+                num_cell = cells[hash_col]
+            elif task_col is not None and task_col < len(cells):
+                num_cell = cells[task_col]
+            parsed = _parse_task_num(num_cell) if num_cell is not None else None
+            if parsed is None:
+                continue  # no num → skip the row
+            num, letter = parsed
+            label = f"{num}{letter}"
+            if label in pairs:
+                continue  # keep the first occurrence per label
+            title = _task_title_from_row(cells, task_col, num, letter)
+            if title:
+                pairs[label] = (num, letter, title)
+    if pairs:
+        return _sort_task_pairs(pairs)
+
+    # --- Tier 3: work_plan_task_*.md file names (only when tiers 1–2 yielded nothing). --- #
+    for name in file_names or ():
+        match = _TASK_FILE_NAME_RE.search(name)
+        if match is None:
+            continue
+        num, letter = int(match.group(1)), match.group(2) or ""
+        label = f"{match.group(1)}{letter}"
+        if label not in pairs:
+            pairs[label] = (num, letter, match.group(3).replace("_", " "))
+    return _sort_task_pairs(pairs)
+
+
 @dataclass(frozen=True)
 class Plan:
     """One reviewed plan discovered by the scan (a folder under ``planning/``).
@@ -322,12 +626,18 @@ class Plan:
         path: The path to ``work_plan.md`` (e.g. ``"planning/orbit-sim/work_plan.md"``).
         title: The plan title (from :func:`extract_title`).
         content_hash: The :func:`plan_folder_hash` of the plan folder.
+        goal: The plan goal text for the listing detail row (from :func:`extract_goal`;
+            ``"—"`` when the plan carries no Purpose/Goal marker).
+        task_titles: The ``(label, title)`` task pairs for the listing detail row (from
+            :func:`extract_task_titles`; ``()`` when no tier yields a task).
 
     Note:
         :attr:`identity` and :attr:`topic` are derived properties — the identity is always
         recomputed from the fields, never stored separately; the attempt number (and hence
         the attempt branch name) is not known here and is computed by the pipeline via
-        :func:`branch_name`.
+        :func:`branch_name`. ``goal`` / ``task_titles`` carry defaults ONLY so that
+        existing direct constructions (test fixtures) keep working; the production path
+        (:func:`discover_plans`) always stamps them from the scan.
     """
 
     repo: str
@@ -335,6 +645,8 @@ class Plan:
     path: str
     title: str
     content_hash: str
+    goal: str = ""
+    task_titles: tuple[tuple[str, str], ...] = ()
 
     @property
     def identity(self) -> str:
@@ -399,6 +711,8 @@ def discover_plans(repo: str, branch: str, entries: list[PlanEntry]) -> list[Pla
                 path=f"{entry.dir}/work_plan.md",
                 title=extract_title(entry.work_plan_text),
                 content_hash=plan_folder_hash(entry.file_contents),
+                goal=extract_goal(entry.work_plan_text),
+                task_titles=extract_task_titles(entry.work_plan_text, list(entry.file_contents)),
             )
         )
     plans.sort(key=lambda p: p.path)
@@ -555,6 +869,11 @@ class ListingRow:
             ``failure`` rows to ``open``).
         remove: The user's remove checkbox (☑ = True; valid on ``success`` rows — the row
             is deleted next scan and re-appears while the plan is still in the scan).
+        goal: The plan goal text for the detail row under this row (workflow-owned; the
+            parsed listing carries no goal, so it defaults to ``""`` and is re-stamped
+            from the scan on every reconcile).
+        task_titles: The ``(label, title)`` task pairs for the detail row (workflow-owned;
+            same default/re-stamp behaviour as :attr:`goal`).
     """
 
     repo_url: str
@@ -565,11 +884,51 @@ class ListingRow:
     title: str
     state: str
     remove: bool
+    goal: str = ""
+    task_titles: tuple[tuple[str, str], ...] = ()
 
 
 def _checkmark(cell: str) -> bool:
     """Map a checkbox cell to a bool (only the ☑ glyph is True; ☐/empty/other → False)."""
     return cell == "☑"
+
+
+def _escape_cell(s: str) -> str:
+    """Escape a pipe for a single listing cell (``|`` → ``\\|``) (private helper).
+
+    Purpose:
+        A pipe in goal/task text must not break the six-column table; the parser splits
+        on raw ``|``, so an escaped pipe still makes the (detail) row the wrong cell
+        count → skipped, which is exactly the safety we want (and keeps the row a valid
+        Markdown cell for human readers).
+    """
+    return s.replace("|", "\\|")
+
+
+def _detail_row(goal: str, task_titles: tuple[tuple[str, str], ...]) -> str:
+    """Render the workflow-owned detail row emitted under each data row (private).
+
+    Purpose:
+        The extra 6-cell row carrying the plan's goal + task titles: ``| — | — |
+        **Goal:** <goal> | **Tasks:** <t1> · <t2> · … | — | — |``. The four dash cells
+        are EM DASHES (U+2014, load-bearing: the separator-row check is
+        ``set(cell) == {"-"}`` and the parser-safety relies on the non-numeric priority
+        cell). ``<goal>`` is the extracted goal text or ``—`` when none; the task list
+        joins ``<label> <title>`` pairs with `` · `` (one space on each side of the
+        middle dot) and is ``—`` when empty (no truncation — every task).
+
+    Args:
+        goal: The plan goal text (``""``/whitespace → the ``—`` fallback).
+        task_titles: The ``(label, title)`` task pairs (empty → the ``—`` fallback).
+
+    Returns:
+        The single detail-row line (no trailing newline).
+    """
+    joined = " · ".join(f"{label} {title}".strip() for label, title in task_titles) or "—"
+    return (
+        f"| — | — | **Goal:** {_escape_cell(goal.strip() or '—')} | "
+        f"**Tasks:** {_escape_cell(joined)} | — | — |"
+    )
 
 
 def parse_listing(md: str) -> list[ListingRow]:
@@ -584,11 +943,19 @@ def parse_listing(md: str) -> list[ListingRow]:
         non-glyph checkboxes) is skipped silently. A row outside any repo/branch section is
         skipped, as is a ``##`` line that appears before any ``#`` section.
 
+        The workflow-rendered **detail row** (``| — | — | **Goal:** … | **Tasks:** … |
+        — | — |`` — one per data row, see :func:`render_listing`) is deliberately
+        skipped: it never parses as a data row because its priority cell (the em dash
+        ``—``) fails ``int()``. The renderer must keep that priority cell non-numeric —
+        that is the parser-safety mechanism (a detail row with pipes in its goal/task
+        text also fails the six-cell count, for the same skip).
+
     Args:
         md: The full listing text (may be empty or None).
 
     Returns:
-        The parsed rows in file order; empty when no valid row was found.
+        The parsed rows in file order (detail rows never included); empty when no valid
+        row was found.
     """
     rows: list[ListingRow] = []
     repo_url: str | None = None
@@ -643,8 +1010,10 @@ def render_listing(rows: list[ListingRow]) -> str:
         emitted ONCE per repo) and, within a repo, by branch (``## <branch>`` per table),
         preserving the first-appearance order of the input rows; rows within a table keep
         their given order, and each table emits the exact header + separator + one line
-        per row. Byte-stable (deterministic for a given input) — the reconciler relies on
-        this to keep the listing diff-free across no-op passes.
+        per row, with the workflow-owned detail row (:func:`_detail_row` — goal + task
+        titles) directly under every data row. Byte-stable (deterministic for a given
+        input) — the reconciler relies on this to keep the listing diff-free across
+        no-op passes.
 
     Args:
         rows: The rows to render (in the desired per-section order).
@@ -677,6 +1046,7 @@ def render_listing(rows: list[ListingRow]) -> str:
                     f"| {'☑' if row.approval else '☐'} | {row.priority} | {row.plan} | "
                     f"{row.title} | {row.state} | {'☑' if row.remove else '☐'} |"
                 )
+                lines.append(_detail_row(row.goal, row.task_titles))
     return "\n".join(lines) + "\n"
 
 
@@ -704,7 +1074,10 @@ def reconcile(
            user's ``open`` wins (state doc synced to ``open``, logged ``re-armed
            <id> (user set open)``). Any other divergence → the workflow state wins.
            User-owned cells (``approval``, ``priority``, ``remove``) are always preserved
-           from the existing row.
+           from the existing row. Every emitted row (rules 1, 2 and the 5-re-add) is
+           re-stamped with the detail-row fields ``goal`` / ``task_titles`` from the
+           scanned :class:`Plan` (parsed rows carry no goal/tasks) — so the detail row
+           under each data row is always fresh on the next render.
         2. **Scanned + not in state** → new row (no checkmarks, ``state="open"``, priority
            = max in its (repo_url, branch) table + 1, or 1 for an empty table) + new state
            entry; logged ``discovered <id> (<repo> @ <branch>)``.
@@ -809,6 +1182,8 @@ def reconcile(
                 title=plan.title,
                 state="open",
                 remove=False,
+                goal=plan.goal,
+                task_titles=plan.task_titles,
             )
             if ident in force_unapproved:
                 actions.append(f"unapproved {ident} (questions raised)")
@@ -863,6 +1238,8 @@ def reconcile(
                 title=plan.title,
                 state="success",
                 remove=False,
+                goal=plan.goal,
+                task_titles=plan.task_titles,
             )
             section_rows[sec].append(row)
             new_rows.append((sec, row))
@@ -877,6 +1254,8 @@ def reconcile(
             title=plan.title,
             state=doc_state,
             remove=remove_tick,
+            goal=plan.goal,
+            task_titles=plan.task_titles,
         )
 
     # --- Pass 2: in state + not scanned (rule 3) → row dropped, entry kept. --- #

@@ -38,7 +38,9 @@ from agentic_scripts.workflows.roadmap_dev import (
     diag_commit_message,
     diag_worktree_dir,
     discover_plans,
+    extract_goal,
     extract_report_sections,
+    extract_task_titles,
     extract_title,
     fresh_state,
     job_status_from_report,
@@ -81,14 +83,23 @@ def _plan(
     repo: str = "y2d2/ARP_MPE",
     branch: str = "main",
     content_hash: str = "c" * 64,
+    goal: str = "",
+    task_titles: tuple[tuple[str, str], ...] = (),
 ) -> Plan:
-    """Build a :class:`Plan` test fixture with a stable (non-colliding) identity."""
+    """Build a :class:`Plan` test fixture with a stable (non-colliding) identity.
+
+    ``goal`` / ``task_titles`` default to empty (the parsed-row shape) so the listing
+    renders byte-stably across the steady-state tests; pass them to exercise the
+    detail-row stamping.
+    """
     return Plan(
         repo=repo,
         branch=branch,
         path=f"{folder}/work_plan.md",
         title=title,
         content_hash=content_hash,
+        goal=goal,
+        task_titles=task_titles,
     )
 
 
@@ -225,6 +236,162 @@ def test_extract_title() -> None:
     assert extract_title("") == "Untitled plan"
 
 
+def test_extract_goal_inline_markers() -> None:
+    """Inline **Purpose:** / **Goal:** markers: the line's remainder is the goal."""
+    assert extract_goal("**Purpose:** Build the DMP.\n") == "Build the DMP."
+    # Leading whitespace + a ``Goal`` marker also match; a marker line mid-text wins.
+    assert extract_goal("  **Purpose:**   Padded marker\n") == "Padded marker"
+    assert extract_goal("intro\n**Goal:**  Ship it\n\nrest\n") == "Ship it"
+
+
+def test_extract_goal_wrapped_inline_and_sections() -> None:
+    """Wrapped inline goals join with single spaces; section goals take the first paragraph."""
+    wrapped = (
+        "**Purpose:** Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the\n"
+        "table-first consortium DMP, in five sequential sub-agent tasks.\n"
+        "\n"
+        "## Tasks\n"
+    )
+    assert extract_goal(wrapped) == (
+        "Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first consortium DMP, "
+        "in five sequential sub-agent tasks."
+    )
+    # A line starting with # (of its own) ends the inline goal.
+    assert extract_goal("**Purpose:** First part\nsecond part\n# A heading\nthird part\n") == (
+        "First part second part"
+    )
+    # ## Purpose section: the FIRST paragraph (the blank after the heading is skipped;
+    # the second paragraph is not the goal).
+    section = (
+        "## Purpose\n"
+        "\n"
+        "Build the ORBIT DMP in five\n"
+        "sequential tasks, table-first.\n"
+        "\n"
+        "Second paragraph is not the goal.\n"
+        "\n"
+        "## Tasks\n"
+    )
+    assert extract_goal(section) == "Build the ORBIT DMP in five sequential tasks, table-first."
+    # ## Goal section without a blank line after the heading; a ## heading ends it.
+    assert extract_goal("## Goal\nOne line goal.\n## Next\n") == "One line goal."
+
+
+def test_extract_goal_fallback_and_adversarial() -> None:
+    """No marker (or an empty one) → '—'; a # heading INSIDE the goal line is kept."""
+    assert extract_goal("no marker here\n## Tasks\n") == "—"
+    assert extract_goal("") == "—"
+    assert extract_goal("**Purpose:**\n") == "—"  # marker, empty remainder, no continuation
+    # A '## E-mail lists' mention INSIDE the goal line must not truncate it.
+    assert (
+        extract_goal("**Purpose:** Relocate the lists (see ## E-mail lists for the format).\n")
+        == "Relocate the lists (see ## E-mail lists for the format)."
+    )
+
+
+def test_extract_task_titles_heading_order_and_duplicates() -> None:
+    """Tier-1 headings: original numbering kept (3b/5c), first per label, sorted."""
+    text = (
+        "### Task 2: Master table\n"
+        "### Task 1: Skeleton & front matter\n"
+        "### Task 3b: Sub part\n"
+        "### Task 1: Duplicate kept-first\n"
+        "### Task 5c: QA pass\n"
+        "### Task 3: Supporting tables\n"
+    )
+    assert extract_task_titles(text) == (
+        ("1", "Skeleton & front matter"),
+        ("2", "Master table"),
+        ("3", "Supporting tables"),
+        ("3b", "Sub part"),
+        ("5c", "QA pass"),
+    )
+
+
+def test_extract_task_titles_ref_tail_cuts() -> None:
+    """Tier-1 ref tails cut at the FIRST connector for all four observed forms."""
+    text = (
+        "### Task 1: Skeleton & front matter → `work_plan_task_1_skeleton.md` "
+        "(single task, @lightweight-dev)\n"
+        "### Task 2: Master table 1 — see `work_plan_task_2_master.md`\n"
+        "### Task 3: Supporting tables 2–6 — `work_plan_task_3_support.md`\n"
+        "### Task 4: Baseline → `lightweight-dev_task_4_baseline.md`\n"
+    )
+    assert extract_task_titles(text) == (
+        ("1", "Skeleton & front matter"),  # the (single task, …) paren after the ref is cut
+        ("2", "Master table 1"),  # — see `…`
+        ("3", "Supporting tables 2–6"),  # — `…` (the en dash in 2–6 is NOT the cut point)
+        ("4", "Baseline"),  # lightweight-dev_task_*.md refs cut too
+    )
+
+
+def test_extract_task_titles_internal_arrow_and_non_task_headings() -> None:
+    """An internal → that does NOT lead to a .md ref never cuts; non-task headings skip."""
+    text = (
+        '### Task 4: Minimal prose + Coera/IP text (user 19/11: "…"; text → speaker notes)\n'
+        "### Task 5: Build X text → speaker notes → `work_plan_task_5_notes.md`\n"
+        "### Tasks 8–9 (remaining drawings + deck integration): CANCELLED\n"
+        "### Bag-reader format support (RESOLVED by Task 2, 2026-10-19, rosbags 0.11.8)\n"
+        "## Tasks\n"
+        "## Task sequence (h2, not a task)\n"
+        "## Task Index (h2, not a task)\n"
+    )
+    assert extract_task_titles(text) == (
+        # The internal arrow tail is part of the title (no .md ref after it).
+        ("4", 'Minimal prose + Coera/IP text (user 19/11: "…"; text → speaker notes)'),
+        # Cut at the FIRST connector that leads to a .md ref (the second arrow).
+        ("5", "Build X text → speaker notes"),
+    )
+
+
+def test_extract_task_titles_table_tier() -> None:
+    """Tier-2 tables: all three observed cell shapes, several tables, no-num rows skip."""
+    text = (
+        "## Tasks\n"
+        "\n"
+        "| Task | File | dispatch |\n"
+        "|------|------|----------|\n"
+        "| 1 — relocate e-mail lists | work_plan_task_1_relocate_email_lists.md | single task |\n"
+        "| 2 | work_plan_task_2_remove_open_source.md | single task |\n"
+        "\n"
+        "## Revision 2\n"
+        "\n"
+        "| # | Task | dispatch |\n"
+        "|---|------|----------|\n"
+        "| 3 | work_plan_task_3_tikz_scenario_b.md — TikZ schematic of 2027 "
+        "Scenario B, render PDF + PNG, visual check | @lightweight-dev |\n"
+        "| 4 | | single task |\n"  # no file anywhere in the row → skipped
+    )
+    assert extract_task_titles(text) == (
+        ("1", "relocate e-mail lists"),  # '1 — <title>' in the Task column
+        ("2", "remove open source"),  # bare '1' + File-column derivation (underscores → spaces)
+        # '#'-column number + file.md — <title> tail (em-dash separated)
+        ("3", "TikZ schematic of 2027 Scenario B, render PDF + PNG, visual check"),
+    )
+    # A non-task table (no task/# header cell) yields nothing.
+    assert extract_task_titles("| Name | Value |\n|------|-------|\n| 1 — foo | bar |\n") == ()
+
+
+def test_extract_task_titles_file_name_tier_and_empty() -> None:
+    """Tier-3 file names (basenames AND folder-relative), numeric sort 2, 10; empty → ()."""
+    names = [
+        "work_plan.md",
+        "work_plan_task_10_last_pass.md",
+        "work_plan_task_2_skeleton.md",
+        "sub/work_plan_task_3_fig.md",  # folder-relative path (basename-anchored match)
+        "notes.md",
+    ]
+    expected = (("2", "skeleton"), ("3", "fig"), ("10", "last pass"))  # 10 sorts AFTER 2
+    assert extract_task_titles("no task headings here\n", names) == expected
+    # The same names as plain basenames (what discover_plans may pass) give the same.
+    assert extract_task_titles("", [Path(n).name for n in names]) == expected
+    # Tiers 1–2 win over tier 3 (heading tasks are kept, file names ignored).
+    assert extract_task_titles("### Task 1: Only heading\n", names) == (("1", "Only heading"),)
+    # Empty input → ().
+    assert extract_task_titles("") == ()
+    assert extract_task_titles("", []) == ()
+
+
 def test_discover_plans_filters_sorts_and_stamps() -> None:
     """discover_plans keeps valid planning/ folders, drops malformed/archived, sorts by dir."""
     entries = [
@@ -256,6 +423,41 @@ def test_discover_plans_filters_sorts_and_stamps() -> None:
     # The content hash excludes the diagnostic file.
     assert alpha.content_hash == plan_folder_hash({"work_plan.md": b"# Alpha\n"})
     assert alpha.identity == plan_identity("o/r", "main", alpha.path, alpha.content_hash)
+
+
+def test_discover_plans_stamps_goal_and_tasks() -> None:
+    """discover_plans stamps each Plan with extract_goal + extract_task_titles."""
+    wp = (
+        "# Orbit DMP v0\n"
+        "\n"
+        "**Purpose:** Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first "
+        "consortium DMP.\n"
+        "\n"
+        "## Tasks\n"
+        "\n"
+        "### Task 1: Skeleton & front matter\n"
+        "\n"
+        "### Task 2: Master table 1\n"
+    )
+    entry = PlanEntry(
+        dir="planning/orbit-dmp",
+        work_plan_text=wp,
+        file_contents={
+            "work_plan.md": wp.encode("utf-8"),
+            "work_plan_task_1_skeleton.md": b"# Skeleton\n",
+            "work_plan_task_2_master.md": b"# Master\n",
+        },
+    )
+    plans = discover_plans("o/r", "main", [entry])
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.goal == (
+        "Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first consortium DMP."
+    )
+    # Tier-1 headings win over the tier-3 task files in file_contents.
+    assert plan.task_titles == (("1", "Skeleton & front matter"), ("2", "Master table 1"))
+    # Identity is unchanged by the new fields (repo/branch/path/hash only).
+    assert plan.identity == plan_identity("o/r", "main", plan.path, plan.content_hash)
 
 
 def test_repo_slug_and_layout_paths(tmp_path: Path) -> None:
@@ -319,7 +521,11 @@ def test_fresh_state_validate_and_make_entry() -> None:
 
 
 def test_parse_listing_round_trip_sample() -> None:
-    """The contract sample parses to exact rows and renders back byte-identically."""
+    """The contract sample parses to exact rows and renders back byte-identically.
+
+    The rendered form now carries the workflow-owned detail row under each data row —
+    the default ``—`` cells here, because the parsed rows carry no goal/tasks.
+    """
     rows = parse_listing(SAMPLE)
     assert rows == [
         ListingRow(
@@ -343,8 +549,24 @@ def test_parse_listing_round_trip_sample() -> None:
             remove=False,
         ),
     ]
-    # Byte-identical round-trip (incl. the trailing newline).
-    assert render_listing(rows) == SAMPLE
+    # Byte-identical round-trip (incl. the trailing newline): the render now expects the
+    # default detail row (| — | — | **Goal:** — | **Tasks:** — | — | — |) after each row.
+    expected = (
+        "# https://github.com/y2d2/ARP_MPE.git\n"
+        "## main\n"
+        "| approval | priority | plan | title | state | remove |\n"
+        "|----------|----------|------|-------|-------|--------|\n"
+        "| ☐ | 1 | planning/orbit-sim/work_plan.md | ORBIT sim extension | open | ☐ |\n"
+        "| — | — | **Goal:** — | **Tasks:** — | — | — |\n"
+        "## dev\n"
+        "| approval | priority | plan | title | state | remove |\n"
+        "|----------|----------|------|-------|-------|--------|\n"
+        "| ☑ | 2 | planning/unitest/work_plan.md | Unit tests | review | ☐ |\n"
+        "| — | — | **Goal:** — | **Tasks:** — | — | — |\n"
+    )
+    assert render_listing(rows) == expected
+    # ...and the pre-detail-row sample still parses to the SAME data rows.
+    assert parse_listing(expected) == rows
 
 
 def test_parse_listing_malformed_input_never_raises() -> None:
@@ -413,22 +635,25 @@ def test_render_listing_empty_stable_and_ordered() -> None:
         "failure",
         False,
     )
+    # The expected output gains a detail row per data row (default ``—`` cells — these
+    # rows carry no goal/tasks).
+    detail = "| — | — | **Goal:** — | **Tasks:** — | — | — |\n"
     out = render_listing([r1, r2, r3])
     assert out == (
         "# https://github.com/o/r.git\n"
         "## main\n"
         "| approval | priority | plan | title | state | remove |\n"
         "|----------|----------|------|-------|-------|--------|\n"
-        "| ☑ | 2 | planning/a/work_plan.md | A | open | ☐ |\n"
+        f"| ☑ | 2 | planning/a/work_plan.md | A | open | ☐ |\n{detail}"
         "## dev\n"
         "| approval | priority | plan | title | state | remove |\n"
         "|----------|----------|------|-------|-------|--------|\n"
-        "| ☐ | 1 | planning/b/work_plan.md | B | success | ☑ |\n"
+        f"| ☐ | 1 | planning/b/work_plan.md | B | success | ☑ |\n{detail}"
         "# https://github.com/o/s.git\n"
         "## main\n"
         "| approval | priority | plan | title | state | remove |\n"
         "|----------|----------|------|-------|-------|--------|\n"
-        "| ☐ | 3 | planning/c/work_plan.md | C | failure | ☐ |\n"
+        f"| ☐ | 3 | planning/c/work_plan.md | C | failure | ☐ |\n{detail}"
     )
     # Byte-stable across repeated calls; no trailing spaces; single trailing newline.
     assert render_listing([r1, r2, r3]) == out
@@ -438,9 +663,173 @@ def test_render_listing_empty_stable_and_ordered() -> None:
     assert LISTING_COLUMNS == ("approval", "priority", "plan", "title", "state", "remove")
 
 
-# --------------------------------------------------------------------------- #
-# C. Reconciler + state machine + reaper (pure)
-# --------------------------------------------------------------------------- #
+def test_parse_listing_skips_detail_rows() -> None:
+    """Rendered detail rows (one per data row) parse to EXACTLY the data rows.
+
+    Adversarial detail-row text — pipes in goal/tasks, the ☑ glyph, the words
+    'approval' and 'open', an all-dash goal, digits in the goal cell — still yields
+    zero extra rows (the detail row's priority cell is the non-numeric em dash, so it
+    can never pass the parser's int() gate; pipes in its text break the cell count).
+    """
+    rows = [
+        ListingRow(
+            "https://github.com/o/r.git",
+            "main",
+            False,
+            1,
+            "planning/a/work_plan.md",
+            "A",
+            "open",
+            False,
+            goal="Has | pipes ☑ approval open words 12345",
+            task_titles=(("1", "Pipe | task ☑ approval open"),),
+        ),
+        ListingRow(
+            "https://github.com/o/r.git",
+            "main",
+            False,
+            2,
+            "planning/b/work_plan.md",
+            "B",
+            "review",
+            False,
+            goal="—",  # all-dash goal
+            task_titles=(("1", "42 digits 3b"),),  # digits in the tasks cell
+        ),
+        ListingRow(
+            "https://github.com/o/r.git",
+            "main",
+            False,
+            3,
+            "planning/c/work_plan.md",
+            "C",
+            "success",
+            True,
+        ),  # defaults → the all-dash detail row
+    ]
+    md = render_listing(rows)
+
+    parsed = parse_listing(md)
+    assert [r.plan for r in parsed] == [  # exactly the data rows — zero extra rows
+        "planning/a/work_plan.md",
+        "planning/b/work_plan.md",
+        "planning/c/work_plan.md",
+    ]
+    assert [r.priority for r in parsed] == [1, 2, 3]
+    # Parsed rows carry no goal/tasks (the detail row never parses as a row).
+    assert all(r.goal == "" and r.task_titles == () for r in parsed)
+    # The user cells of the adversarial goal/tasks never leak into the parsed rows.
+    assert [r.title for r in parsed] == ["A", "B", "C"]
+
+
+def test_render_listing_emits_detail_rows() -> None:
+    """render_listing: exact detail-row bytes (goal/tasks present and absent, pipes)."""
+    with_goal_tasks = ListingRow(
+        "https://github.com/o/r.git",
+        "main",
+        False,
+        1,
+        "planning/orbit-dmp/work_plan.md",
+        "ORBIT DMP v0",
+        "open",
+        False,
+        goal="Build the DMP, table-first.",
+        task_titles=(("1", "Skeleton & front matter"), ("2", "Master table 1")),
+    )
+    default = ListingRow(
+        "https://github.com/o/r.git",
+        "main",
+        True,
+        2,
+        "planning/unitest/work_plan.md",
+        "Unit tests",
+        "review",
+        False,
+    )
+    md = render_listing([with_goal_tasks, default])
+    assert md == (
+        "# https://github.com/o/r.git\n"
+        "## main\n"
+        "| approval | priority | plan | title | state | remove |\n"
+        "|----------|----------|------|-------|-------|--------|\n"
+        "| ☐ | 1 | planning/orbit-dmp/work_plan.md | ORBIT DMP v0 | open | ☐ |\n"
+        "| — | — | **Goal:** Build the DMP, table-first. | "
+        "**Tasks:** 1 Skeleton & front matter · 2 Master table 1 | — | — |\n"
+        "| ☑ | 2 | planning/unitest/work_plan.md | Unit tests | review | ☐ |\n"
+        "| — | — | **Goal:** — | **Tasks:** — | — | — |\n"
+    )
+    # Pipes in goal/task text are escaped (a raw pipe would break the table).
+    pipe_row = ListingRow(
+        "https://github.com/o/r.git",
+        "main",
+        False,
+        1,
+        "planning/p/work_plan.md",
+        "P",
+        "open",
+        False,
+        goal="a | b",
+        task_titles=(("1", "x | y"),),
+    )
+    md2 = render_listing([pipe_row])
+    assert "**Goal:** a \\| b" in md2
+    assert "**Tasks:** 1 x \\| y" in md2
+    # Byte-stable across calls; single trailing newline; no trailing spaces.
+    assert render_listing([with_goal_tasks, default]) == md
+    assert md.endswith("\n") and not md.endswith("\n\n")
+    assert all(line == line.rstrip() for line in md.splitlines())
+
+
+def test_listing_pipeline_fixed_point() -> None:
+    """Steady-state no-push invariant with the detail row: render is a fixed point.
+
+    ``render(reconcile(plans, parse(render(reconcile(plans, []))), st1)) == file0``:
+    the parse skips the detail rows, the reconcile re-stamps them from the same scan,
+    and the render is byte-identical (state doc value-equal, no actions logged).
+    """
+    plans = [
+        _plan(
+            folder="planning/orbit-dmp",
+            title="ORBIT DMP v0",
+            goal="Build the consortium DMP, table-first.",
+            task_titles=(("1", "Skeleton & front matter"), ("2", "Master table 1")),
+        ),
+        _plan(folder="planning/unitest", title="Unit tests"),
+    ]
+    st0 = fresh_state()
+    rows0, st1, log0 = reconcile(plans, [], st0, now=NOW)
+    assert len(log0) == 2  # both plans discovered
+    file0 = render_listing(rows0)
+
+    rows1, st2, log1 = reconcile(plans, parse_listing(file0), st1, now=NOW)
+    file1 = render_listing(rows1)
+
+    assert file1 == file0  # byte-stable fixed point (the steady-state no-push invariant)
+    assert rows1 == rows0  # re-stamped rows are value-equal to the first pass
+    assert st2 == st1  # state doc unchanged in the steady state
+    assert log1 == []  # no actions in the steady state
+    # Every data row in file0 is immediately followed by ITS detail row.
+    lines = file0.splitlines()
+    data_idx = [
+        i
+        for i, line in enumerate(lines)
+        if line.startswith("|")
+        and len(line.strip()[1:-1].split("|")) == 6
+        and line.strip()[1:-1].split("|")[1].strip().isdigit()
+    ]
+    assert len(data_idx) == 2
+    # Scan order (path-sorted): orbit-dmp first, unitest second.
+    assert "planning/orbit-dmp/work_plan.md" in lines[data_idx[0]]
+    assert "planning/unitest/work_plan.md" in lines[data_idx[1]]
+    for i in data_idx:
+        detail = lines[i + 1]
+        assert detail.startswith("| — | — | **Goal:**")
+        assert detail.endswith("| — | — |")
+    # The stamped plan gets its goal/tasks detail row ...
+    assert "**Goal:** Build the consortium DMP, table-first." in lines[data_idx[0] + 1]
+    assert "**Tasks:** 1 Skeleton & front matter · 2 Master table 1" in lines[data_idx[0] + 1]
+    # ... and the default plan renders the all-dash detail row.
+    assert lines[data_idx[1] + 1] == "| — | — | **Goal:** — | **Tasks:** — | — | — |"
 
 
 def test_repo_from_url_forms() -> None:
@@ -460,7 +849,9 @@ def test_reconcile_discovers_new_plan_empty_and_nonempty_table() -> None:
     """New plan → row under the right section, no checkmarks, priority max+1 / 1, entry."""
     plan = _plan()
 
-    # Empty listing → priority 1; state entry created; discovery logged.
+    # Empty listing → priority 1; state entry created; discovery logged. The emitted
+    # row carries the detail-row fields stamped from the scanned Plan (defaults here —
+    # the fixture plan carries no goal/tasks).
     rows, doc, log = reconcile([plan], [], fresh_state(), now=NOW)
     assert rows == [
         ListingRow(
@@ -472,11 +863,24 @@ def test_reconcile_discovers_new_plan_empty_and_nonempty_table() -> None:
             plan.title,
             "open",
             False,
+            goal=plan.goal,
+            task_titles=plan.task_titles,
         )
     ]
     assert doc["plans"][plan.identity]["state"] == "open"
     assert doc["plans"][plan.identity]["attempt"] == 0
     assert f"discovered {plan.identity} (y2d2/ARP_MPE @ main)" in log
+
+    # A plan with known goal/tasks → the output row is stamped with them.
+    known = _plan(
+        folder="planning/known",
+        title="Known plan",
+        goal="The known goal.",
+        task_titles=(("1", "One"), ("2", "Two")),
+    )
+    rows_known, _, _ = reconcile([known], [], fresh_state(), now=NOW)
+    assert rows_known[0].goal == "The known goal."
+    assert rows_known[0].task_titles == (("1", "One"), ("2", "Two"))
 
     # Non-empty table in the same (repo_url, branch) section → priority max+1.
     other = _plan(folder="planning/unitest", title="Unit tests")
