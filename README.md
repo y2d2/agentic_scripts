@@ -32,8 +32,11 @@ restart, because this container has no init system to restart cron for us). It:
 3. verifies the `admin_repo` clone from the config (needed by mail-keeper);
 4. verifies the global OpenCode agent for every *enabled* workflow that declares one
    (`~/.config/opencode/agents/<name>.md`; base-only state with `noop` passes trivially);
-5. creates the runtime dirs (`state/`, `logs/`, `sandbox/`);
-6. installs the 30-minute timer — via systemd on real hosts, or cron in this container
+5. runs the roadmap-dev preflight — empty `roadmap_prompts.allowed_repos` → inert note;
+   otherwise a best-effort (WARN-only) `git ls-remote` reachability check of the allowed
+   repos and the listing repo;
+6. creates the runtime dirs (`state/`, `logs/`, `sandbox/`);
+7. installs the 30-minute timer — via systemd on real hosts, or cron in this container
    (installs the `cron` package if absent and starts the daemon).
 
 Exit code `0` iff every step printed `[OK]` (a missing `GITHUB_PAT` is a `[WARN]`, not a failure).
@@ -294,6 +297,201 @@ uv run agentic-scripts run                          # scheduled run (gate-checke
 The agent/skill lives in the global OpenCode config (`~/.config/opencode/agents/oc-todo-resolver.md`
 + `skills/oc-todo-resolver/SKILL.md`). See the high-level plan at
 `planning/workflows-oc-todo/workflows-oc-todo_plan.md`.
+
+## Roadmap-dev workflow
+
+### Overview
+
+The `roadmap-dev` workflow turns the rig into an unattended plan-execution engine: on
+every 30-minute fire it scans the allowed repos for reviewed plans that are not archived,
+and — whenever the box is idle (no interactive OpenCode sessions, day or night) — keeps
+its execution slots continuously full, each job a headless `planner-enhanced` run that
+executes one approved plan strictly sequentially via `@lightweight-dev`. Delivery is a
+pushed attempt branch (`roadmap-dev/<id>-<n>`, carrying the implementation + the archived
+plan folder) that a human opens as a PR and verifies — the workflow itself never creates
+PRs. The live listing (`plans.md` in `y2d2/autonomous_task_overview`) is the operator
+surface: state, priority, and approval at a glance.
+
+### Configuration (`roadmap_prompts.*` + `workflows.roadmap-dev`)
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `roadmap_prompts.allowed_repos` | `[]` | Ordered list of GitHub repos to scan for un-archived plans, in `owner/name` form. **Empty = no-op** (nothing to scan). |
+| `roadmap_prompts.listing_repo` | `y2d2/autonomous_task_overview` | The live plan-listing repo (`owner/name` form) — home of `plans.md`. |
+| `roadmap_prompts.listing_repo_url` | `""` | Optional clone-URL override for the listing repo (a local path or mirror — the hermetic-test seam); `""` derives `git@github.com:<listing_repo>.git`. |
+| `roadmap_prompts.listing_path` | `plans.md` | The listing file inside the listing repo. |
+| `roadmap_prompts.listing_branch` | `main` | The branch holding the listing. |
+| `roadmap_prompts.run_timeout_minutes` | `480` | Per-job hard timeout (8 h) for one execution run; expiry is a process-group kill → `failure`. |
+| `roadmap_prompts.test_commands` | `{}` | Optional per-repo test command (keys must be in `allowed_repos`) the executing agent must pass. |
+| `roadmap_prompts.repo_urls` | `{}` | Optional per-repo clone-URL override (a local path or mirror — the hermetic-test seam). |
+
+The `workflows.roadmap-dev` entry adds `agent: planner-enhanced` and `gate: idle` — a
+per-workflow gate type (existing workflows keep the quiet-window gate, unchanged). The
+**idle gate** is open iff the shared OpenCode service reports **zero active interactive
+sessions** (`GET /api/session/active`, Basic auth from
+`~/.local/state/opencode/service.json`), day or night, under the same
+two-consecutive-polls rule as the quiet gate (separate state key `idle_gate_last_ok`) —
+so ~30–60 min of sustained idle precede any start. Worker runs use
+`opencode run --standalone` and are invisible to the probe **by construction**; a probe
+failure is treated as *idle* (logged at WARNING). Phase 1 (scan + listing reconcile)
+runs on every fire regardless of the gate; only the drain is gated.
+
+### How a run works
+
+1. **Phase 1 — scan + reconcile** (every fire): the reaper first (orphaned `pending`
+   entries — crash/box-restart — flip back to `open`, their worktrees are cleaned up),
+   then per allowed repo: clone-or-fetch into `sandbox/roadmap-dev/clones/<owner>__<name>`
+   and scan **every remote branch** (the workflow's own `roadmap-dev/*` attempt branches
+   are skipped) for `planning/<topic>/work_plan.md` outside `planning/archived/`.
+   `plans.md` is then reconciled — new plans appear as `open` rows (workflow-owned
+   `title`/`state` cells refresh from the scan; user-owned `approval`/`priority`/`remove`
+   cells are never clobbered), a `success` row with `remove` ☑ drops on the next scan,
+   and rows whose plan vanished (archived/merged/deleted/edited) reconcile away.
+2. **Phase 2 — room check**: the idle gate must be open (see above).
+3. **Phase 3 — drain**: while the gate stays open and startable plans remain, the slots
+   are kept continuously full — **1 by day, 2 by night** (night = the 22:00–08:00 quiet
+   window) — starting the highest-priority ☑-approved `open` / re-☑'d `review` plan into
+   each free slot. The moment a job ends, its slot is topped up immediately (re-reading
+   the listing first, so the user can re-prioritize between jobs); the scan is re-run
+   every 30 min while jobs are in flight; and when the gate closes (user returns), no new
+   starts — in-flight jobs finish (let-finish).
+4. **Job contract** — one headless `planner-enhanced` run (autonomy brief, 480-min
+   timeout) in a worktree on a fresh branch `roadmap-dev/<id>-<attempt>` cut from the
+   plan's branch: (1) **review the plan** — a *major* open question (changes scope,
+   requirements, or dependencies — NOT implementation detail) is written to
+   `planning/<topic>/questions.md` and the report status is `questions`; minor decisions
+   are made and recorded by the run itself; (2) otherwise **execute** by dispatching
+   `@lightweight-dev` **strictly sequentially, one small self-contained task at a time**,
+   verifying each task's acceptance criteria before the next; (3) **report** with an
+   explicit `Status:` line. No git by the agent — the runner owns git.
+5. **Runner outcomes**: `success` → verify (no blockers, tests green if configured,
+   non-empty diff) → commit the implementation + **archive the plan folder** (whole
+   folder → `planning/archived/`) → **push the attempt branch** (base = the plan's
+   branch) — **NO PR is created; a human opens it and verifies** → state `success`.
+   `questions` → `questions.md` as a small `OC:` commit on the **plan's branch** +
+   checkmark removed (logged) → state `review`. `failure`/timeout → `failure.md`
+   (reason) on the plan's branch → state `failure`. Crash/box-restart → the reaper flips
+   the orphaned `pending` back to `open` (infra death ≠ job failure → auto-retry on the
+   next drain).
+
+### The listing
+
+`plans.md` in `y2d2/autonomous_task_overview` (branch `main`): one `#` section per repo
+(repo URL as header), one `##` table per branch — repo and branch are headers, not
+columns:
+
+```markdown
+# https://github.com/y2d2/ARP_MPE.git
+## main
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 1 | planning/orbit-sim/work_plan.md | ORBIT sim extension | open | ☐ |
+## dev
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☑ | 2 | planning/unitest/work_plan.md | Unit tests | review | ☐ |
+```
+
+Column legend: `approval` — the user's checkmark (the permission to execute);
+`priority` — numeric, ascending (1 = first; ties by row order; new plans get max+1 in
+their table); `plan` — the path to `work_plan.md`; `title` — workflow-owned, refreshed
+from the scan; `state` — workflow-owned (see below); `remove` — the user's checkmark,
+valid on `success` rows → the row is dropped on the next scan (it reappears as
+`success` while the attempt branch is unmerged, then disappears for good once the plan
+folder is merged away). Plan identity = repo + branch + plan-folder path + content hash
+of the folder (excluding `questions.md`/`failure.md`) — **an edited plan is a new plan**
+(new row, new attempt numbering).
+
+### State machine
+
+| state | meaning | startable |
+|---|---|---|
+| `open` | discovered, awaiting approval/execution | yes, with ☑ |
+| `pending` | job running | no |
+| `review` | major questions in `questions.md`; **checkmark removed by the workflow** (logged) | yes, once the user re-☑'s |
+| `success` | attempt branch `roadmap-dev/<id>-<n>` pushed (implementation + archived plan folder, base = the plan's branch) — a human opens the PR, verifies, merges | no; removable via `remove` ☑ |
+| `failure` | `failure.md` (reason) on the plan's branch; plan not archived | no — re-arm = set the state cell `open` (or edit the plan → new identity → `open`) |
+
+`success`/`failure` are never auto-restarted; a re-appeared `success` row stays
+`success` (it is never re-executed). Re-arming a `failure` row — setting its `state`
+cell to `open` — is the one sanctioned user edit of a workflow-owned cell.
+
+### Operator commands
+
+```bash
+uv run agentic-scripts run --force --only roadmap-dev   # full scan + drain on demand (bypasses the gate)
+uv run agentic-scripts run                              # scheduled run (gate-checked)
+```
+
+Everything else is an edit to `plans.md` (or to the plan's branch), committed and
+pushed — the next scan picks it up:
+
+- **Approve** a plan — ☑ its `approval` cell.
+- **Re-prioritize** — change the numeric `priority` (1 = first; ties by row order).
+- **Answer a review** — edit `planning/<topic>/questions.md` on the plan's branch,
+  commit + push, then re-☑ the row.
+- **Re-arm a failure** — set the row's `state` cell to `open`.
+- **Remove a success row** — ☑ its `remove` cell.
+- **Open a PR** from a pushed attempt branch (human step) — in a local clone of the
+  plan's repo, `git checkout roadmap-dev/<id>-<n>` (or the GitHub UI) and open the PR
+  (base = the plan's branch); the branch carries the implementation + the archived plan
+  folder.
+- **Prune** merged attempt branches — `git push origin --delete roadmap-dev/<id>-<n>`
+  (manual; the attempt branches are the forensics).
+- **Logs** — `logs/run-<run_id>.log` + `logs/last-run.txt` (see the Logs section).
+
+### Where outputs live
+
+- Listing: `plans.md` on `main` of `y2d2/autonomous_task_overview` (also visible in the
+  `ARP_roadmap` vault under `autonomous_task_overview/` as a submodule).
+- Attempt branches: on each plan's remote repo — `roadmap-dev/<id>-<n>` (implementation
+  + archived plan folder); a human opens the PR from it.
+- State: `state/roadmap-dev.json` (machine bookkeeping per plan: identity, state,
+  attempt, pid, attempt-branch name, commit sha, last error).
+- Sandbox: `sandbox/roadmap-dev/clones/<owner>__<name>` (full clones),
+  `sandbox/roadmap-dev/wt/<owner>__<name>/<identity>` (execution worktrees),
+  `sandbox/roadmap-dev/diag/<owner>__<name>/<identity>` (diagnostics worktrees for
+  `questions.md`/`failure.md`), `sandbox/roadmap-dev/prompts` (the listing-repo clone).
+- Logs: `logs/run-<run_id>.log` + `logs/last-run.txt`.
+
+### Guardrails
+
+- **Allowlist-only scanning** — a repo outside `allowed_repos` is never scanned or
+  executed; the shipped allowlist is empty (and the entry ships disabled), so the
+  workflow is a no-op until both land.
+- **`success`/`failure` never auto-restart** — re-arm is a human cell edit (or a plan
+  edit → new identity); a re-appeared `success` row is never re-executed.
+- **No GitHub API, no PR creation** — all git over SSH; PR + merge are human-level
+  verification, and the attempt branches are the forensics a human opens as PRs and
+  prunes. No `GITHUB_PAT` anywhere in this workflow.
+- **User-owned listing cells are never clobbered** — `approval`, `priority`, `remove`,
+  and the `failure` → `open` re-arm survive any number of reconciles (a
+  non-fast-forward listing push re-reads the remote listing and re-reconciles before
+  re-pushing, once).
+- **Drain holds the global lock** — while a drain runs (potentially hours), other
+  workflow fires and manual `--force` runs skip on the lock until it ends; the drain
+  itself re-runs the scan every 30 min, so the listing stays live (accepted risk).
+- **8 h per-job hard timeout** — process-group kill; a hang becomes a `failure`, never
+  an unbounded loop.
+- **Worktrees are always cleaned** — `finally` after each job + the reaper at the next
+  run (crash safety).
+- **Fresh attempt branches only** — pushes to a plan's remote are freshly created
+  `roadmap-dev/<id>-<n>`; diagnostics are small `OC:` commits on the plan's branch (the
+  surface the user answers).
+
+> **First run:** the shipped config has an empty `roadmap_prompts.allowed_repos` list and
+> the `roadmap-dev` entry is `enabled: false` — the workflow is a no-op until the
+> allowlist is filled in and the entry is flipped (follow-up integration task). The
+> one-shot bootstrap for the listing repo is `scripts/bootstrap_task_overview.sh` (pure
+> git over SSH — no PAT, no curl): it pushes the staged initial content (this repo's
+> `autonomous_task_overview/`) to the empty `y2d2/autonomous_task_overview` repo and,
+> with `--vault <path>`, wires it into the vault as the `autonomous_task_overview/`
+> submodule (committing only `.gitmodules` + the submodule path).
+
+The agent lives in the global OpenCode config
+(`~/.config/opencode/agents/planner-enhanced.md`); plan-authoring guidance lives with
+the listing itself (the `y2d2/autonomous_task_overview` README). See the high-level plan
+at `planning/workflows-roadmap-dev/workflows-roadmap-dev_plan.md`.
 
 ## Extending with a new workflow
 

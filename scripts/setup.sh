@@ -2,9 +2,10 @@
 # setup.sh — idempotent turnkey setup for agentic_scripts.
 #
 # Syncs the uv environment (runtime + dev extras), checks GITHUB_PAT, verifies the
-# admin repo and the agents of every registered enabled workflow, creates the runtime
-# dirs, and installs the 30-minute timer via systemd (real hosts) or cron (this
-# container). Every step prints [OK]/[WARN]/[FAIL]; exit 0 iff no [FAIL].
+# admin repo and the agents of every registered enabled workflow, runs the
+# roadmap-dev preflight (allowlist/listing reachability — best-effort), creates the
+# runtime dirs, and installs the 30-minute timer via systemd (real hosts) or cron
+# (this container). Every step prints [OK]/[WARN]/[FAIL]; exit 0 iff no [FAIL].
 #
 # Re-run after a container restart: the cron daemon does not survive it (no init
 # system here), and re-running setup is the documented recovery.
@@ -85,11 +86,48 @@ else
     done <<< "$AGENT_LINES"
 fi
 
-# --- 6. Runtime dirs -------------------------------------------------------------
+# --- 6. roadmap-dev preflight ---------------------------------------------------
+# Data-driven read of the roadmap_prompts section (same uv-run-python pattern as
+# step 5). Shipped empty allowlist (or absent section) -> the workflow is inert.
+# Otherwise: best-effort SSH reachability (15 s timeout) of each allowed repo and
+# the listing repo — WARN, never FAIL: reachability is advisory (the workflow logs
+# per-repo errors at run time), and the listing repo legitimately does not exist
+# until scripts/bootstrap_task_overview.sh has run. NO PAT here: roadmap-dev is
+# pure git over SSH (all git@github.com:…).
+ROADMAP_LINES="$(uv run --project "$ROOT" python -c '
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1]))
+rp = cfg.get("roadmap_prompts") or {}
+repos = rp.get("allowed_repos") or []
+if not repos:
+    print("inert")
+else:
+    overrides = rp.get("repo_urls") or {}
+    for r in repos:
+        print("repo", r, overrides.get(r) or f"git@github.com:{r}.git")
+    lr = rp.get("listing_repo") or ""
+    if lr:
+        print("listing", lr, rp.get("listing_repo_url") or f"git@github.com:{lr}.git")
+' "$ROOT/config/workflows.yaml")"
+if grep -qx 'inert' <<< "$ROADMAP_LINES"; then
+    ok "roadmap-dev: allowlist empty — workflow is inert (no-op until repos are listed)"
+else
+    while read -r kind rid url; do
+        if timeout 15 git ls-remote --exit-code "$url" HEAD >/dev/null 2>&1; then
+            ok "roadmap-dev: $rid reachable over SSH ($url)"
+        elif [ "$kind" = "listing" ]; then
+            warn "roadmap-dev: listing repo $rid not reachable over SSH ($url) — run scripts/bootstrap_task_overview.sh (the workflow cannot reconcile the listing until the repo is reachable)"
+        else
+            warn "roadmap-dev: $rid not reachable over SSH ($url) — best-effort preflight; the workflow logs per-repo errors at run time"
+        fi
+    done <<< "$ROADMAP_LINES"
+fi
+
+# --- 7. Runtime dirs -------------------------------------------------------------
 mkdir -p "$ROOT/state" "$ROOT/logs" "$ROOT/sandbox"
 ok "runtime dirs present (state, logs, sandbox)"
 
-# --- 7. Timer: systemd → cron detection ------------------------------------------
+# --- 8. Timer: systemd → cron detection ------------------------------------------
 if systemctl is-system running >/dev/null 2>&1; then
     # Real systemd host: render the shipped units (__ROOT__ placeholder) and enable.
     sed "s|__ROOT__|$ROOT|g" "$ROOT/systemd/agentic-scripts.service" > /etc/systemd/system/agentic-scripts.service
@@ -125,7 +163,7 @@ else
     echo "note: container has no init system — after a container restart, re-run \`bash scripts/setup.sh\` to re-register the cron daemon."
 fi
 
-# --- 8. Summary -------------------------------------------------------------------
+# --- 9. Summary -------------------------------------------------------------------
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
     ok "setup complete (no failures)"
