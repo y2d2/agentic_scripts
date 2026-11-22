@@ -422,7 +422,9 @@ def test_second_run_no_changes_is_a_noop(base_config: Config, tmp_path: Path) ->
 
 
 def test_drain_stub_note_tracks_gate(base_config: Config, tmp_path: Path) -> None:
-    """[AC4 note] With the gate open the drain stub note is the exact Task-4 string."""
+    """[AC4 note] With the gate open the drain RUNS (no approvals in the fixture →
+    nothing startable → the drain ends after one decision); gate closed → the exact
+    skip note. ``active_sessions`` is injected so the live probe stays hermetic."""
     bare_a = _make_fixture_remote(tmp_path)
     bare_p = _make_prompts_remote(tmp_path)
     config = _config(
@@ -431,13 +433,21 @@ def test_drain_stub_note_tracks_gate(base_config: Config, tmp_path: Path) -> Non
         repo_urls={FIXTURE_REPO: str(bare_a)},
         listing_repo_url=str(bare_p),
     )
-    ctx = _ctx(config, tmp_path / "state", gate_open=True)
+    wf = RoadmapDevWorkflow(
+        config.roadmap_prompts, git=Git(), now_fn=lambda: NOW, active_sessions=lambda: 0
+    )
 
-    result = _wf(config).run(ctx)
+    result = wf.run(_ctx(config, tmp_path / "state", gate_open=True))
 
     assert result.status == "ok"
     assert [a for a in result.actions if a.startswith("drain")] == [
-        "drain: not implemented (Task 4)"
+        "drain start slots=1 startable=0",
+        "drain done (slots=1 startable=0)",
+    ]
+
+    closed = wf.run(_ctx(config, tmp_path / "state2", gate_open=False))
+    assert [a for a in closed.actions if a.startswith("drain")] == [
+        "drain skipped (idle gate closed)"
     ]
 
 
@@ -469,12 +479,13 @@ def test_user_listing_edits_are_preserved(base_config: Config, tmp_path: Path) -
     r2 = _wf(config, git).run(ctx)
 
     assert r2.status == "ok"
-    # The user commit after the workflow's own commit makes the FIRST push a genuine
-    # non-fast-forward → the documented ONE retry fires: it re-reads the remote and finds
-    # it ALREADY in the reconciled state (every edited cell is user-owned) → the re-commit
-    # is a no-op, so no second push is needed.
-    assert git.push_calls == 1
-    assert any("retrying after fetch" in a for a in r2.actions)
+    # Task 4's stale-HEAD fix: before committing, the local branch is re-pointed to
+    # origin/<branch> (the user commit) when it is behind — the render (every edited
+    # cell is user-owned, workflow cells already correct) is then byte-identical to
+    # the remote tip → the no-op commit skips the push entirely (nothing to deliver;
+    # no rejected push needed). The ONE-retry path still covers a true commit→push
+    # race (see test_prompts_push_race_retries_and_keeps_user_commit).
+    assert git.push_calls == 0
     # Both user cells preserved; workflow-owned cells (title/state) still correct.
     listing = _remote_listing(bare_p)
     assert approved_unitest in listing
@@ -694,8 +705,10 @@ def test_prompts_push_race_retries_and_keeps_user_commit(
     r2 = _wf(config, g2).run(ctx)
 
     assert r2.status == "ok"
-    assert g2.push_calls == 2  # first rejected (non-ff), the retry lands
-    assert any("retrying after fetch" in a for a in r2.actions)
+    # Task 4's stale-HEAD fix: the local branch is re-pointed to the user commit
+    # BEFORE committing, so the reconciled listing is committed ON TOP of the user
+    # commit → one fast-forward push (no rejected first push, no retry needed).
+    assert g2.push_calls == 1
 
     # Remote history: the user commit is KEPT (not force-overwritten); the latest commit
     # is the retry's OC: reconcile; no OC: commit is lost.

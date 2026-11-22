@@ -87,6 +87,10 @@ class AgentResult:
         error: A human-readable failure description for ``error``/``timeout`` statuses;
             None on success.
         duration_seconds: Wall-clock seconds the run took (from spawn to reap).
+        pid: The child's PID, captured right after ``Popen``; None when the result was
+            built without a live process (the spawn itself failed). Forensic value only —
+            no workflow relies on pid liveness (the roadmap-dev reaper treats every
+            ``pending`` entry in a NEW process as an orphan by construction).
     """
 
     status: str
@@ -95,6 +99,7 @@ class AgentResult:
     events: list[dict] = field(default_factory=list)
     error: str | None = None
     duration_seconds: float = 0.0
+    pid: int | None = None
 
 
 class AgentRunner:
@@ -218,7 +223,8 @@ class AgentRunner:
             stderr=subprocess.PIPE,
             start_new_session=True,  # own process group → killpg reaches agent children
         )
-        self._log.debug("agent %s started (pid=%d): %s", agent, proc.pid, " ".join(cmd))
+        pid = proc.pid  # forensic: surfaced on AgentResult.pid (roadmap-dev state entries)
+        self._log.debug("agent %s started (pid=%d): %s", agent, pid, " ".join(cmd))
 
         events: list[dict] = []
         stderr_lines: list[str] = []
@@ -272,6 +278,7 @@ class AgentRunner:
                 events=events,
                 error=f"agent run exceeded {timeout}s",
                 duration_seconds=duration,
+                pid=pid,
             )
             self._log.info(
                 "agent %s done status=%s exit=%s events=%d duration=%.1fs",
@@ -312,6 +319,7 @@ class AgentRunner:
             events=events,
             error=error,
             duration_seconds=duration,
+            pid=pid,
         )
         self._log.info(
             "agent %s done status=%s exit=%s events=%d duration=%.1fs",

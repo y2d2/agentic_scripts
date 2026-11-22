@@ -1,7 +1,8 @@
 """The ``roadmap-dev`` workflow core: reviewed-plan identity + discovery, the ``plans.md``
 listing parser/renderer, the user-cell-preserving reconciler, the state machine + reaper,
 and the brief / commit-message renderers — the shell runs phase 1 (reaper, scan,
-reconcile, push) on every run; the idle-gated drain is stubbed until Task 4.
+reconcile, push) on every run and, when the idle gate is open, an in-process top-up
+drain (1 slot by day / 2 by night) that executes approved plans headlessly.
 
 Purpose:
     Provide every helper the roadmap-dev pipeline needs as a small, independently
@@ -18,8 +19,12 @@ Purpose:
     :class:`RoadmapDevWorkflow` shell (``create`` + ``run``) wires the constructor seams
     and implements phase 1: the run-start reaper (orphan flip + worktree cleanup), the
     per-repo clone/fetch + all-branch scan, the listing read/reconcile/commit/push (one
-    non-fast-forward retry), and the atomic state persist; the idle-gated drain is a stub
-    until Task 4.
+    non-fast-forward retry), and the atomic state persist; the idle-gated drain
+    (:meth:`RoadmapDevWorkflow._drain`) keeps the slots full (1 by day / 2 by night via
+    ``machine.quiet_window``), tops up the moment a job ends, lets in-flight jobs finish
+    when the live session probe reports the gate closed, and routes every outcome to its
+    state + git form — success pushes the attempt branch (NO PR, NO GitHub API; the human
+    opens the PR), ``questions``/``failure`` land as diag commits on the plan's branch.
 
 Rationale:
     A **reviewed plan** is a folder ``planning/<topic>/work_plan.md`` (+ task files) on a
@@ -62,11 +67,14 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from agentic_scripts.agent import AgentResult
 from agentic_scripts.config import Config, RoadmapPrompts
 from agentic_scripts.git import Git, GitError
 from agentic_scripts.workflows.base import WorkflowResult
@@ -115,6 +123,18 @@ _DIAG_KINDS = ("questions", "failure")
 
 #: The result-report status line the brief mandates (first match wins, case-insensitive).
 _STATUS_LINE_RE = re.compile(r"^\s*status\s*:\s*(success|questions|failure)\s*$", re.IGNORECASE)
+
+#: The headless agent the drain spawns for one approved plan (the reviewed-plan executor).
+_AGENT_NAME = "planner-enhanced"
+
+#: The bounded join timeout (seconds) the drain uses when waiting for at least one
+#: in-flight job to finish (the spec's "bounded poll, e.g. 15 s — join-with-timeout").
+_JOB_JOIN_TIMEOUT_SECONDS = 15
+
+#: The hard timeout (seconds) of the success-path tests gate (the repo's test command
+#: run in the attempt worktree). A deliberate fixed default — NOT configurable in this
+#: task (a follow-up could add ``roadmap_prompts.test_timeout_seconds``).
+_TESTS_GATE_TIMEOUT_SECONDS = 600
 
 
 # --- Identity and layout helpers --------------------------------------------- #
@@ -663,6 +683,7 @@ def reconcile(
     *,
     now: datetime,
     force_unapproved: frozenset[str] = frozenset(),
+    rearm_guard: frozenset[str] = frozenset(),
 ) -> tuple[list[ListingRow], dict, list[str]]:
     """Reconcile the scan + state against the listing (the heart of idempotency, pure).
 
@@ -696,6 +717,15 @@ def reconcile(
         ``force_unapproved`` (identities the pipeline wants de-approved, e.g. after a
         ``questions`` outcome) sets ``approval=False`` on those rows in this pass — the ONE
         sanctioned user-cell overwrite, logged ``unapproved <id> (questions raised)``.
+
+        ``rearm_guard`` (identities whose ``failure`` was just routed IN THIS DRAIN)
+        suppresses the sanctioned re-arm for them in this pass: mid-drain, the REMOTE
+        row's ``open`` state cell is stale (the failure has not been pushed yet) and
+        must not be mistaken for a user re-arm — otherwise a failed job would re-arm
+        itself on the drain's own re-scan and restart forever. The failure row is
+        pushed by this pass instead; a LATER pass (fresh run, no guard) sees
+        ``failure`` vs ``failure`` and stays put, and a genuine user re-arm (row state
+        set to ``open`` after the failure row landed) re-arms as documented.
 
     Rationale:
         Row identity is matched on ``(repo, branch, path)`` (rows carry no content hash),
@@ -785,7 +815,12 @@ def reconcile(
         # preserved from the existing row (defaults when the row is absent).
         doc_state = entry.get("state")
         re_armed = False
-        if doc_state == "failure" and existing is not None and existing.state == "open":
+        if (
+            doc_state == "failure"
+            and existing is not None
+            and existing.state == "open"
+            and ident not in rearm_guard
+        ):
             doc_state = "open"  # the sanctioned re-arm: the user's open wins
             re_armed = True
 
@@ -1213,6 +1248,39 @@ def clone_env_for(pat: str | None) -> dict[str, str] | None:
     }
 
 
+@dataclass
+class _JobRecord:
+    """One in-flight drain job (the drain thread's view of a started plan execution).
+
+    Attributes:
+        identity: The plan's 12-char identity (the state-entry key).
+        plan: The :class:`Plan` being executed.
+        clone: The full-clone directory the attempt worktree is registered in.
+        wt: The attempt worktree directory (the runner's ``work_dir``).
+        attempt: The 1-based attempt number for this execution.
+        branch_name: The fresh attempt branch (``roadmap-dev/<id>-<attempt>``).
+        thread: The worker thread running the headless agent (the drain's join target);
+            None until spawned.
+        result: The :class:`AgentResult` the worker stored on completion (None while in
+            flight). A worker that dies (the runner raised — an infrastructure anomaly,
+            since :class:`~agentic_scripts.agent.AgentRunner.run` maps its own faults to
+            error results) leaves this None and sets :attr:`error`; the drain aborts the
+            run so the ``pending`` entry (persisted before spawn) stays for the reaper.
+        error: A one-line description of the worker's fault (``repr`` of the exception);
+            None for a normal completion — forensic, surfaced in the drain's abort.
+    """
+
+    identity: str
+    plan: Plan
+    clone: Path
+    wt: Path
+    attempt: int
+    branch_name: str
+    thread: threading.Thread | None = None
+    result: AgentResult | None = None
+    error: str | None = None
+
+
 def create(config: Config) -> "RoadmapDevWorkflow":  # noqa: UP037 - forward ref; class defined below
     """Create and return a :class:`RoadmapDevWorkflow` instance (the scheduler's entry point).
 
@@ -1243,19 +1311,24 @@ def create(config: Config) -> "RoadmapDevWorkflow":  # noqa: UP037 - forward ref
 
 
 class RoadmapDevWorkflow:
-    """The roadmap-dev workflow: one idempotent run (phase 1 + drain stub).
+    """The roadmap-dev workflow: one idempotent run (phase 1 + the idle-gated drain).
 
     Purpose:
         Hold the injected collaborators and expose the stable :attr:`name` plus
-        :meth:`run`. Phase 1 is implemented (:meth:`_scan_and_reconcile`): on every run,
-        reap orphaned ``pending`` plans (state flip + worktree cleanup), scan all
+        :meth:`run`. Phase 1 (:meth:`_scan_and_reconcile`) runs on every run: reap
+        orphaned ``pending`` plans (state flip + worktree cleanup), scan all
         ``allowed_repos`` (sandbox clone/fetch, all branches except ``roadmap-dev/*``)
         for un-archived plans, reconcile the remote ``plans.md`` in the listing-repo
         clone, and commit + push the listing when it changed (one non-fast-forward
-        retry). The idle-gated drain is still a stub: :meth:`_run` appends the load-bearing
-        note ``"drain: not implemented (Task 4)"`` (gate open) or
-        ``"drain skipped (idle gate closed)"`` (gate closed) — Task 4 replaces that with
-        :meth:`_drain`.
+        retry). When ``ctx.gate_open`` the in-process drain (:meth:`_drain`) then keeps
+        the slots full — 1 by day / 2 by night (``machine.quiet_window``), recomputed
+        every iteration — starting approved plans as headless ``planner-enhanced`` runs
+        in attempt worktrees (``roadmap-dev/<id>-<attempt>``), topping up the moment a
+        job ends, letting in-flight jobs finish when the live session probe reports the
+        gate closed (no preemption), and routing every outcome to its state + git form
+        (success: verify + commit + archive + push the attempt branch — NO PR —;
+        questions/failure/timeout: diag commits on the plan's branch). Gate closed →
+        the exact note ``"drain skipped (idle gate closed)"``.
 
     Rationale:
         Constructor injection (``git`` / ``runner`` / ``active_sessions`` / ``now_fn``) is
@@ -1525,7 +1598,15 @@ class RoadmapDevWorkflow:
             return ""
 
     def _reconcile_and_push(
-        self, ctx, prompts_clone: Path, plans: list[Plan], st: dict, current_md: str
+        self,
+        ctx,
+        prompts_clone: Path,
+        plans: list[Plan],
+        st: dict,
+        current_md: str,
+        *,
+        force_unapproved: frozenset[str] = frozenset(),
+        rearm_guard: frozenset[str] = frozenset(),
     ) -> tuple[dict, list[str], list[str]]:
         """Reconcile the fetched listing against the scan + state and push the result.
 
@@ -1552,6 +1633,12 @@ class RoadmapDevWorkflow:
             plans: The scanned plans (this run).
             st: The current state document (the reaper's output; never mutated in place).
             current_md: The fetched listing text ("" when the file/branch is absent).
+            force_unapproved: Identities to de-approve in this pass (the ``questions``
+                outcome's ONE sanctioned approval removal; empty in the regular phase-1
+                passes) — forwarded to :func:`reconcile` on every pass (first + retry).
+            rearm_guard: Identities whose ``failure`` was just routed in this drain
+                (the drain's in-flight/top-up re-scans); empty in the regular phase-1
+                passes — forwarded to :func:`reconcile` on every pass (first + retry).
 
         Returns:
             A ``(new_state, actions, errors)`` tuple — the reconciled state document
@@ -1575,7 +1662,14 @@ class RoadmapDevWorkflow:
         errors: list[str] = []
 
         rows = parse_listing(current_md)
-        new_rows, new_state, logs = reconcile(plans, rows, st, now=self._now())
+        new_rows, new_state, logs = reconcile(
+            plans,
+            rows,
+            st,
+            now=self._now(),
+            force_unapproved=force_unapproved,
+            rearm_guard=rearm_guard,
+        )
         actions.extend(logs)
 
         if render_listing(new_rows) == current_md:
@@ -1607,6 +1701,18 @@ class RoadmapDevWorkflow:
             return True
 
         try:
+            # Re-point the local branch when it is BEHIND the remote (e.g. the user
+            # pushed a listing edit after this clone's last fetch): the no-op commit
+            # check is local-HEAD-relative, so a stale local HEAD would silently skip
+            # the very push that consumes the user's edit (e.g. a remove ☑ whose
+            # re-appearance is byte-identical to the workflow's last pushed row).
+            try:
+                if self._git.rev_parse(prompts_clone, branch) != self._git.rev_parse(
+                    prompts_clone, f"origin/{branch}"
+                ):
+                    self._git.checkout(prompts_clone, branch, ref=f"origin/{branch}")
+            except GitError:
+                pass  # local branch or origin/<branch> absent — the checkout below
             if branch != self._git.current_branch(prompts_clone):
                 self._git.checkout(prompts_clone, branch, ref=f"origin/{branch}")
             pushed = commit_and_push(render_listing(new_rows))
@@ -1625,7 +1731,12 @@ class RoadmapDevWorkflow:
                 self._git.checkout(prompts_clone, branch, ref=f"origin/{branch}")
                 current_md = self._fetch_listing(ctx, prompts_clone)
                 new_rows, new_state, logs = reconcile(
-                    plans, parse_listing(current_md), new_state, now=self._now()
+                    plans,
+                    parse_listing(current_md),
+                    new_state,
+                    now=self._now(),
+                    force_unapproved=force_unapproved,
+                    rearm_guard=rearm_guard,
                 )
                 actions.extend(logs)
                 if commit_and_push(render_listing(new_rows)):
@@ -1780,15 +1891,73 @@ class RoadmapDevWorkflow:
             Clones/fetches under the sandbox; worktree cleanup for reaped orphans; at
             most one (or two, on the retry) listing commit + push.
         """
+        # --- 1. Reaper (before any scan — this is a fresh process, so every ``pending``
+        #        entry IS an orphan). --- #
+        st, reaped = self._reap_orphans(ctx, st)
+
+        # --- 2–6. Scan + reconcile (no reaper inside — see that method). --- #
+        plans, new_state, _rows, logs = self._scan_and_reconcile_no_reap(ctx, st, errors)
+        return plans, new_state, reaped + logs + errors
+
+    def _scan_and_reconcile_no_reap(
+        self,
+        ctx,
+        st: dict,
+        errors: list[str],
+        *,
+        force_unapproved: frozenset[str] = frozenset(),
+        rearm_guard: frozenset[str] = frozenset(),
+    ) -> tuple[list[Plan], dict, list[ListingRow], list[str]]:
+        """Run phase 1 WITHOUT the run-start reaper — the drain's re-scan surface.
+
+        Purpose:
+            The scan/reconcile body that :meth:`_scan_and_reconcile` runs after its
+            reaper step, exposed separately for the drain's re-scan cadence (at drain
+            start the caller's fresh phase 1 is the scan; every subsequent top-up and
+            every ``machine.poll_interval_minutes`` while jobs are in flight re-scans
+            here, re-reading the REMOTE ``plans.md`` so user edits between jobs are
+            honored): (1) clone-or-fetch every allowed repo (config order) and scan all
+            its branches for un-archived plans; (2) clone-or-fetch the listing repo and
+            hand the scan + state to :meth:`_reconcile_and_push`, which reads the
+            current ``plans.md`` from ``origin/<listing_branch>``, reconciles, and
+            commits + pushes when the rendered listing changed (one non-fast-forward
+            retry). Without a prompts clone the listing push is skipped (the error was
+            already recorded), but the scan results + reconciled state still return.
+
+            The reaper is deliberately NOT run here: mid-drain, ``pending`` entries
+            belong to IN-FLIGHT jobs (not to a dead process) and must not be reaped —
+            the reaper's contract is run-start (new process). A fresh process (phase 1
+            of a new run) always goes through :meth:`_scan_and_reconcile`, which reaps
+            first.
+
+        Args:
+            ctx: The shared context (sandbox, logger, run_id).
+            st: The current state document (copy-on-write by the reconciler; the input
+                is never mutated in place).
+            errors: The run's business-error list (appended: clone/fetch failures,
+                listing push failures) — the caller maps any entry to ``status="error"``.
+            force_unapproved: Identities to de-approve in this pass (the ``questions``
+                outcome's force pass — the ONE sanctioned approval removal; empty in the
+                drain's regular re-scans) — forwarded to :func:`reconcile`.
+            rearm_guard: Identities whose ``failure`` was just routed in this drain
+                (suppressed re-arm — see :func:`reconcile`; empty outside the drain).
+
+        Returns:
+            A ``(plans, new_state, rows, logs)`` tuple — the scanned plans, the
+            reconciled state document, the current listing rows (re-read from the remote
+            after the push — the fresh table for the drain's startable selection;
+            ``[]`` when the prompts clone is unavailable), and the human-readable action
+            notes (scan + reconcile log lines + listing push notes).
+
+        Side Effects:
+            Clones/fetches under the sandbox; at most one (or two, on the retry) listing
+            commit + push.
+        """
         root = ctx.sandbox_dir / "roadmap-dev"
         settings = self._settings
         actions: list[str] = []
 
-        # --- 1. Reaper (before any scan). --- #
-        st, reaped = self._reap_orphans(ctx, st)
-        actions.extend(reaped)
-
-        # --- 2+3. Per allowed repo (config order): clone-or-fetch + scan. A repo
+        # --- 1. Per allowed repo (config order): clone-or-fetch + scan. A repo
         #        failure never stops the other repos. --- #
         plans: list[Plan] = []
         for repo in settings.allowed_repos:
@@ -1802,7 +1971,7 @@ class RoadmapDevWorkflow:
             actions.append(f"scanned {repo}: {len(repo_plans)} plan(s)")
             ctx.logger.info("roadmap-dev: %s — found %d plan(s)", repo, len(repo_plans))
 
-        # --- 4. Prompts clone (the listing repo). --- #
+        # --- 2. Prompts clone (the listing repo). --- #
         prompts_clone = self._clone_or_fetch(
             ctx,
             self._prompts_repo_url(),
@@ -1811,20 +1980,893 @@ class RoadmapDevWorkflow:
             errors,
         )
 
-        # --- 5+6. Read the current listing and reconcile (unconditionally). --- #
+        # --- 3. Read the current listing and reconcile (unconditionally). --- #
+        rows: list[ListingRow] = []
         if prompts_clone is None:
-            # No listing surface: the scan + reconciled state still persist.
-            _, new_state, logs = reconcile(plans, [], st, now=self._now())
+            # No listing surface: the scan + reconciled state still return.
+            _, new_state, logs = reconcile(
+                plans,
+                [],
+                st,
+                now=self._now(),
+                force_unapproved=force_unapproved,
+                rearm_guard=rearm_guard,
+            )
             actions.append("listing push skipped (prompts clone unavailable)")
             actions.extend(logs)
         else:
             current_md = self._fetch_listing(ctx, prompts_clone)
             new_state, push_actions, push_errors = self._reconcile_and_push(
-                ctx, prompts_clone, plans, st, current_md
+                ctx,
+                prompts_clone,
+                plans,
+                st,
+                current_md,
+                force_unapproved=force_unapproved,
+                rearm_guard=rearm_guard,
             )
             actions.extend(push_actions)
             errors.extend(push_errors)
-        return plans, new_state, actions + errors
+            # Re-read the (possibly just-pushed) listing: the fresh table for the drain.
+            rows = parse_listing(self._fetch_listing(ctx, prompts_clone))
+        return plans, new_state, rows, actions
+
+    # --- Drain (phase 2/3: slots, top-up, let-finish, job pipeline) ----------- #
+
+    def _slots(self, ctx, now: datetime) -> int:
+        """Return the drain's job slots at ``now`` (2 in the quiet window, 1 by day).
+
+        Purpose:
+            The night/day slot model: "night" is the existing ``machine.quiet_window``
+            (22:00–08:00) — two jobs may run concurrently then, one by day. Recomputed
+            at every drain-loop iteration (the wall clock can cross a boundary mid-drain).
+
+        Args:
+            ctx: The shared context (for ``ctx.config.machine.quiet_window``).
+            now: The drain's clock (the injected :meth:`_now`; never a bare
+                ``datetime.now()``).
+
+        Returns:
+            2 when ``now`` is inside the quiet window (night), else 1 (day).
+        """
+        return 2 if ctx.config.machine.quiet_window.in_window(now.time()) else 1
+
+    def _listing_rows(self, ctx, errors: list[str]) -> list[ListingRow]:
+        """Return the current remote listing rows (the fresh ``plans.md`` table).
+
+        Purpose:
+            The drain's startable selection needs the user-owned cells (approval) that
+            only the listing carries: ensure the listing-repo clone (clone-or-fetch — a
+            call after phase 1 is just a fetch), read ``plans.md`` from
+            ``origin/<listing_branch>``, and parse it. A missing clone (the error is
+            already recorded) yields ``[]`` — the selection then finds nothing startable.
+
+        Args:
+            ctx: The shared context.
+            errors: The run's business-error list (appended on a clone failure).
+
+        Returns:
+            The parsed rows (possibly empty); never raises.
+        """
+        root = ctx.sandbox_dir / "roadmap-dev"
+        settings = self._settings
+        prompts_clone = self._clone_or_fetch(
+            ctx,
+            self._prompts_repo_url(),
+            prompts_clone_dir(root),
+            f"listing repo {settings.listing_repo}",
+            errors,
+        )
+        if prompts_clone is None:
+            return []
+        return parse_listing(self._fetch_listing(ctx, prompts_clone))
+
+    def _select_startable(
+        self, plans: list[Plan], rows: list[ListingRow], st: dict, skip: set[str]
+    ) -> list[Plan]:
+        """Select the startable plans for one top-up, in (priority, row-order) order.
+
+        Purpose:
+            The per-top-up start decision: a plan is startable when its state entry is
+            ``open`` or ``review`` (a ``review`` row is startable exactly when the user
+            re-☑'d it — approval is a user-owned listing cell) AND its listing row is
+            approved (☑). The result is sorted by ``(priority, original row order)`` —
+            the scan order of ``plans`` is the tie-break — and deduplicated by identity.
+            There are NO API lookups here: re-execution safety comes from the state
+            machine (``success``/``failure`` are not startable; a ``success`` row
+            re-appearing after a ``remove`` ☑ stays ``success`` per the reconciler, so it
+            is never startable again) — no PR/branch existence check is needed (there is
+            no GitHub API in this workflow).
+
+        Args:
+            plans: The freshly scanned plans (scan order = the tie-break order).
+            rows: The current listing rows (the user-owned cells).
+            st: The current state document.
+            skip: Identities to exclude (start failures earlier in this drain — they
+                were reverted to ``open`` and must not be retried in the same drain).
+
+        Returns:
+            The startable plans in start order; empty when nothing may start.
+        """
+        rows_by_key: dict[tuple[str, str, str], ListingRow] = {}
+        for row in rows:
+            repo = repo_from_url(row.repo_url)
+            if repo is not None:
+                rows_by_key[(repo, row.branch, row.plan)] = row
+        entries = st.get("plans") or {}
+        indexed: list[tuple[int, int, Plan]] = []
+        seen: set[str] = set()
+        for idx, plan in enumerate(plans):
+            if plan.identity in seen or plan.identity in skip:
+                continue
+            entry = entries.get(plan.identity)
+            if entry is None or entry.get("state") not in ("open", "review"):
+                continue
+            row = rows_by_key.get((plan.repo, plan.branch, plan.path))
+            if row is None or not row.approval:
+                continue
+            seen.add(plan.identity)
+            indexed.append((row.priority, idx, plan))
+        indexed.sort(key=lambda item: (item[0], item[1]))
+        return [plan for _, _, plan in indexed]
+
+    def _run_job(
+        self,
+        ctx,
+        job: _JobRecord,
+        runner,
+        brief: str,
+        title: str,
+        timeout_seconds: int,
+    ) -> None:
+        """Run the headless agent for one job (the worker thread's entry point).
+
+        Purpose:
+            The ONLY thing a job thread does: call the runner (the real
+            :class:`~agentic_scripts.agent.AgentRunner` in production, a fake in tests)
+            and store the :class:`AgentResult` on :attr:`_JobRecord.result`. Job threads
+            never touch the state document or the git world — the drain thread serializes
+            outcome routing after the join (single lock + atomic save).
+
+            A worker that DIES (the runner raised) deliberately leaves ``result`` None
+            (and records ``job.error``): :class:`AgentRunner.run` maps its own faults to
+            error results, so a raising runner is an infrastructure anomaly — the drain
+            aborts the run (its pending entry was persisted before spawn and stays for
+            the reaper; in-flight sibling jobs become orphans for the same reason). The
+            exception is CAUGHT here (threading has no per-thread ``excepthook``) so the
+            fault goes to the run logger instead of Python's default thread output.
+
+        Args:
+            ctx: The shared context (logger for the fault line).
+            job: The job record (``work_dir`` = its attempt worktree).
+            runner: The agent runner (injected or from ``ctx.runner``).
+            brief: The rendered autonomy brief (see :func:`render_brief`).
+            title: The session title (``roadmap-dev <id> (<run_id>)``).
+            timeout_seconds: The per-job hard budget (``run_timeout_minutes * 60``).
+
+        Side Effects:
+            One ``runner.run`` call (its own subprocess in production); a fault is
+            logged at ERROR (the thread still exits cleanly).
+        """
+        try:
+            job.result = runner.run(
+                agent=_AGENT_NAME,
+                brief=brief,
+                work_dir=job.wt,
+                title=title,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - worker fault → the drain aborts on it
+            job.error = repr(exc)
+            ctx.logger.error("roadmap-dev: job %s worker thread raised: %r", job.identity, exc)
+
+    def _start_job(
+        self,
+        ctx,
+        plan: Plan,
+        st: dict,
+        lock: threading.Lock,
+        actions: list[str],
+        errors: list[str],
+        slot_no: int,
+        slots: int,
+    ) -> _JobRecord | None:
+        """Start one job: pending persist, attempt worktree, headless spawn.
+
+        Purpose:
+            The per-job start sequence (spec order): (1) the state entry flips to
+            ``pending`` (``attempt += 1``, ``started_at``, ``pid=None`` — the runner does
+            not expose the pid until it returns, so the entry stores the result's pid
+            alongside the outcome at job end; the reaper never consults pid liveness) and
+            is persisted ATOMICALLY BEFORE the spawn (a crash leaves a ``pending`` for
+            the reaper); (2) the attempt worktree is prepared (drop a stale local
+            ``branch_name``, clean any leaked worktree, ``worktree_add`` from
+            ``origin/<plan.branch>`` — the oc_todo pattern); (3) the headless
+            ``planner-enhanced`` run is spawned in a worker thread with the
+            ``run_timeout_minutes`` budget. A worktree-setup fault reverts the entry to
+            ``open`` (infrastructure, not the plan's fault — the next fire retries it;
+            the attempt number sticks, so the branch name stays free) and records a
+            business error; it returns None (no job).
+
+        Args:
+            ctx: The shared context (sandbox, run_id, logger; ``ctx.runner`` is the
+                production runner when none was injected).
+            plan: The startable :class:`Plan`.
+            st: The current state document (mutated under ``lock``).
+            lock: The drain's single state lock (every state mutation + save goes through
+                it — the T3 discipline).
+            actions: The drain's action-note list (appended to).
+            errors: The run's business-error list (appended to on a start fault; names
+                the repo + identity so the operator can act).
+            slot_no: The 1-based slot number this job takes (the log line).
+            slots: The total slots at this moment (the log line).
+
+        Returns:
+            The started :class:`_JobRecord`, or None when the start failed (the entry was
+            reverted to ``open`` and the caller must skip this identity for this drain).
+
+        Side Effects:
+            One atomic state save (the ``pending`` persist; one more on a start fault),
+            at most one worktree remove + one ``worktree_add``, one worker-thread spawn
+            (the runner call happens INSIDE the thread, not here).
+        """
+        settings = self._settings
+        root = ctx.sandbox_dir / "roadmap-dev"
+        identity = plan.identity
+        clone = clone_dir(root, plan.repo)
+        wt = plan_worktree_dir(root, plan.repo, identity)
+        entry = st.get("plans", {}).get(identity)
+        if entry is None:
+            errors.append(f"{plan.repo} ({identity}): no state entry to start (state drift)")
+            return None
+        attempt = int(entry.get("attempt", 0)) + 1
+        branch = branch_name(identity, attempt)
+        now = self._now()
+        with lock:
+            st["plans"][identity] = {
+                **entry,
+                "state": "pending",
+                "attempt": attempt,
+                "started_at": _utc_iso(now),
+                "pid": None,
+                "branch_name": branch,
+                "finished_at": None,
+                "last_run_id": ctx.run_id,
+                "updated_at": _utc_iso(now),
+            }
+            ctx.state.save(_STATE_KEY, st)
+
+        try:
+            # Worktree: drop a stale local attempt branch, clean a leaked worktree.
+            try:
+                self._git.rev_parse(clone, branch)
+                self._git.delete_branch(clone, branch)  # stale from a prior attempt
+            except GitError:
+                pass  # no local branch (the normal case) — nothing to delete
+            if wt.exists():
+                self._best_effort_remove_worktree(ctx, clone, wt)
+            self._git.worktree_add(clone, wt, branch, f"origin/{plan.branch}")
+        except GitError as exc:
+            with lock:
+                st["plans"][identity] = {
+                    **entry,
+                    "state": "open",
+                    "attempt": attempt,
+                    "last_error": f"worktree setup failed: {exc}",
+                    "branch_name": branch,
+                    "updated_at": _utc_iso(self._now()),
+                }
+                ctx.state.save(_STATE_KEY, st)
+            errors.append(f"{plan.repo} ({identity}): worktree setup failed: {exc}")
+            ctx.logger.warning("roadmap-dev: worktree setup failed for %s: %s", identity, exc)
+            actions.append(f"job {identity} not started: worktree setup failed")
+            return None
+
+        runner = self._runner_override or ctx.runner
+        brief = render_brief(
+            run_id=ctx.run_id,
+            plan=plan,
+            repo_url=f"https://github.com/{plan.repo}.git",
+            attempt=attempt,
+            timeout_minutes=settings.run_timeout_minutes,
+            test_cmd=settings.test_commands.get(plan.repo),
+        )
+        title = f"roadmap-dev {identity} ({ctx.run_id})"
+        job = _JobRecord(
+            identity=identity,
+            plan=plan,
+            clone=clone,
+            wt=wt,
+            attempt=attempt,
+            branch_name=branch,
+        )
+        job.thread = threading.Thread(
+            target=self._run_job,
+            args=(ctx, job, runner, brief, title, settings.run_timeout_minutes * 60),
+            name=f"roadmap-dev-{identity}",
+            daemon=True,
+        )
+        job.thread.start()
+        actions.append(f"top-up: starting {identity} (slot {slot_no}/{slots})")
+        ctx.logger.info(
+            "roadmap-dev: top-up: starting %s (attempt %d) on %s", identity, attempt, branch
+        )
+        return job
+
+    def _detach_head(self, ctx, clone: Path) -> None:
+        """Detach the clone's HEAD (``git checkout --detach``; no Git-helper method).
+
+        Purpose:
+            :meth:`_commit_diag` needs the LOCAL branch named ``plan.branch`` to be
+            free so it can re-create it inside a worktree. A fresh default clone has
+            that branch checked out in the clone's main worktree, where it cannot be
+            deleted. Detaching moves HEAD off it without deleting the branch — and is
+            safe because the per-repo clone is a read-only scan surface: the workflow
+            never commits in its main worktree (the scan reads ``origin/<branch>``
+            refs, and every write — attempt worktrees, diag worktrees, listing pushes
+            on the separate prompts clone — happens elsewhere).
+
+        Args:
+            ctx: The shared context (logger for the failure line).
+            clone: The per-repo full clone to detach.
+
+        Raises:
+            GitError: If the git call fails — the caller treats it as a diag fault
+                (the outcome degrades to a ``"<diag_file> push failed"`` failure).
+        """
+        proc = subprocess.run(
+            ["git", "-C", str(clone), "checkout", "--detach"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            ctx.logger.error(
+                "roadmap-dev: checkout --detach failed in %s: %s",
+                clone,
+                (proc.stderr or "").strip()[-400:],
+            )
+            stderr_tail = (proc.stderr or "").strip()[-400:]
+            raise GitError(f"checkout --detach failed in {clone}: {stderr_tail}")
+
+    def _commit_diag(
+        self,
+        ctx,
+        job: _JobRecord,
+        diag_file: str,
+        content: str,
+        actions: list[str],
+        errors: list[str],
+    ) -> bool:
+        """Commit + push one diagnostics file onto the plan's branch (diag worktree).
+
+        Purpose:
+            The operator surface for ``questions``/``failure`` outcomes: in a
+            DIAGNOSTICS worktree cut on the LOCAL branch named exactly ``plan.branch``
+            from ``origin/<plan.branch>`` (a local branch sharing the remote-tracking
+            name is legal; any stale local copy is dropped first), write
+            ``<topic>/<diag_file>``, commit with :func:`diag_commit_message` (the
+            idempotent ``commit`` — ``False`` means the content was already committed, a
+            no-op success), and push. A non-fast-forward push triggers ONE retry: fetch,
+            re-point the local branch to the remote tip, re-apply + re-commit, re-push;
+            a second failure gives up (False) so the caller degrades the outcome to a
+            ``"<diag_file> push failed"`` failure. The diag worktree is always removed
+            (finally).
+
+        Args:
+            ctx: The shared context (sandbox, run_id, logger).
+            job: The finished job (repo/plan/clone/identity).
+            diag_file: ``"questions.md"`` or ``"failure.md"``.
+            content: The file content to commit (verbatim — for ``failure.md`` the
+                planner's report or the failure reason).
+            actions: The drain's action-note list (appended to on a push retry).
+            errors: The run's business-error list (appended to on a give-up; names the
+                repo + identity).
+
+        Returns:
+            True when the file is committed and pushed (or already present — the commit
+            no-op), False when the push failed even after the ONE retry.
+
+        Side Effects:
+            One diag-worktree add/remove pair, at most two diag commits, at most two
+            pushes, one fetch per retry.
+        """
+        root = ctx.sandbox_dir / "roadmap-dev"
+        identity = job.identity
+        plan = job.plan
+        git = self._git
+        clone = job.clone
+        diag_wt = diag_worktree_dir(root, plan.repo, identity)
+        kind = "questions" if diag_file == "questions.md" else "failure"
+        message = diag_commit_message(identity, kind, ctx.run_id)
+        target = diag_wt / Path(plan.topic) / diag_file
+        try:
+            # Fresh diag worktree: drop a stale local plan.branch, clean a leaked dir.
+            try:
+                git.rev_parse(clone, plan.branch)
+            except GitError:
+                pass  # no local branch (the normal case)
+            else:
+                # A fresh default clone sits on plan.branch (the remote's default
+                # branch) in its main worktree, and `git branch -D` refuses a
+                # checked-out branch. The per-repo clone is a read-only scan surface
+                # (every write happens in a worktree), so detach HEAD first — then
+                # the local branch can be dropped and re-created in the diag worktree.
+                if git.current_branch(clone) == plan.branch:
+                    self._detach_head(ctx, clone)
+                git.delete_branch(clone, plan.branch)
+            if diag_wt.exists():
+                self._best_effort_remove_worktree(ctx, clone, diag_wt)
+            git.worktree_add(clone, diag_wt, plan.branch, f"origin/{plan.branch}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            git.add(diag_wt)
+            if not git.commit(diag_wt, message):
+                pass  # no-op: identical content already committed (idempotent re-apply)
+            try:
+                git.push(diag_wt, plan.branch)
+            except GitError:
+                # ONE retry: fetch, re-point to the remote tip, re-apply, re-push.
+                ctx.logger.warning(
+                    "roadmap-dev: %s push conflict for %s — one retry after fetch",
+                    diag_file,
+                    identity,
+                )
+                actions.append(f"{diag_file} push conflict for {identity} — one retry after fetch")
+                git.fetch(clone)
+                git.checkout(diag_wt, plan.branch, ref=f"origin/{plan.branch}")
+                target.write_text(content, encoding="utf-8")
+                git.add(diag_wt)
+                git.commit(diag_wt, message)  # False is fine (already identical)
+                git.push(diag_wt, plan.branch)  # may raise → caught below
+        except GitError as exc:
+            errors.append(f"{plan.repo} ({identity}): {diag_file} push failed: {exc}")
+            ctx.logger.error("roadmap-dev: %s push failed for %s: %s", diag_file, identity, exc)
+            return False
+        finally:
+            self._best_effort_remove_worktree(ctx, clone, diag_wt)
+        return True
+
+    def _route_success(self, ctx, job: _JobRecord, actions: list[str]) -> tuple[str, dict]:
+        """Run the success pipeline (tests gate → commit → archive → push) for one job.
+
+        Purpose:
+            The ``success`` outcome's delivery steps in spec order: (a) the tests gate —
+            the repo's configured test command run in the attempt worktree (non-zero
+            exit or a 600 s timeout → failure, NO commit, NO push; no configured command
+            → skip with a note); (b) the non-empty diff gate — ``git add`` + commit with
+            :func:`render_commit_title` (``False`` → failure "agent made no changes —
+            nothing to commit"); (c) the archive — ``git mv`` of the plan folder to
+            ``planning/archived/<topic>/`` + commit with :func:`archive_commit_message`
+            (``False`` → failure "archive produced no commit"), recording ``HEAD`` as
+            ``commit_sha``; (d) the attempt-branch push (``upstream=True`` — a
+            :class:`GitError` → failure "push failed: …"; the local branch stays for
+            forensics). The pushed attempt branch (implementation + archived plan folder)
+            IS the delivery — NO PR is created, NO GitHub API is called (the human opens
+            the PR; user decision 2026-11-21).
+
+        Args:
+            ctx: The shared context (run_id in the commit messages).
+            job: The finished job (attempt worktree + branch).
+            actions: The drain's action-note list (appended to: the tests-gate skip note).
+
+        Returns:
+            A ``(word, fields)`` tuple — ``word`` is ``"success"`` or ``"failure"``;
+            ``fields`` carries ``commit_sha`` (on success) or ``last_error`` (the full
+            failure reason, truncated by the caller for the state entry).
+
+        Side Effects:
+            At most one tests-gate subprocess (600 s hard timeout), one implementation
+            commit, one archive commit (a staged rename), one attempt-branch push.
+            Raises :class:`GitError` on an unexpected git fault (the caller maps it to a
+            failure).
+        """
+        settings = self._settings
+        git = self._git
+        wt = job.wt
+        plan = job.plan
+
+        # a. Tests gate (only when the repo has a configured test command).
+        test_cmd = settings.test_commands.get(plan.repo)
+        if test_cmd is not None:
+            try:
+                proc = subprocess.run(
+                    test_cmd,
+                    shell=True,
+                    cwd=wt,
+                    capture_output=True,
+                    text=True,
+                    timeout=_TESTS_GATE_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                tail = ""
+                if exc.stderr:
+                    raw = exc.stderr.decode(errors="replace")
+                    if not isinstance(exc.stderr, bytes):
+                        raw = exc.stderr
+                    tail = raw.strip()[-1000:]
+                reason = (
+                    f"tests failed: test command timed out after {_TESTS_GATE_TIMEOUT_SECONDS}s"
+                )
+                if tail:
+                    reason = f"{reason}: {tail}"
+                return "failure", {"last_error": reason}
+            if proc.returncode != 0:
+                tail = (proc.stderr or "").strip()[-1000:]
+                return "failure", {"last_error": f"tests failed: {tail}"}
+        else:
+            actions.append(f"no test command for {plan.repo} — tests gate skipped")
+
+        # b. Non-empty diff gate (the idempotency primitive — False = nothing to commit).
+        git.add(wt)
+        if git.commit(wt, render_commit_title(plan)) is False:
+            return "failure", {"last_error": "agent made no changes — nothing to commit"}
+
+        # c. Archive the plan folder (git mv → staged rename → the archive commit).
+        #    Ensure the archive PARENT exists on disk first: `git mv` does the rename
+        #    via rename(2), which ENOENTs when the destination parent (e.g. a repo
+        #    with no planning/archived/ yet) is missing — an empty untracked dir is
+        #    enough, git only needs the parent to exist.
+        topic = plan.topic
+        archive_dst = f"planning/archived/{topic.split('/')[-1]}"
+        (wt / "planning" / "archived").mkdir(parents=True, exist_ok=True)
+        git.mv(wt, topic, archive_dst)
+        git.add(wt)
+        if git.commit(wt, archive_commit_message(job.identity, ctx.run_id)) is False:
+            return "failure", {"last_error": "archive produced no commit"}
+        commit_sha = git.rev_parse(wt, "HEAD")
+
+        # d. Push the attempt branch (the delivery — a human opens the PR).
+        git.push(wt, job.branch_name, upstream=True)
+        return "success", {"commit_sha": commit_sha}
+
+    def _route_job(
+        self, ctx, job: _JobRecord, st: dict, errors: list[str]
+    ) -> tuple[dict, list[str], str | None]:
+        """Route one finished job's outcome (drain thread; serializes the state update).
+
+        Purpose:
+            The outcome machine (spec order), run on the drain thread AFTER the worker
+            thread joined — the job thread itself never touches state or git:
+
+            1. ``status in {error, timeout}`` → **failure**, reason ``"agent <status>:
+               <error or status>"`` (covers the stray headless-question exit-1 — the
+               documented auto-retry is the user's re-arm); failure.md = the reason.
+            2. ``status == "ok"``: the report's status line decides. No status line →
+               **failure** ``"no explicit status line in planner report"`` (failure.md =
+               the report). ``"failure"`` → **failure** (failure.md = the report — the
+               planner's Blockers included; ``last_error`` = the blockers section).
+            3. ``"questions"``: the worktree must carry ``<topic>/questions.md`` (missing
+               → **failure** ``"status=questions but no questions.md in worktree"``);
+               otherwise the diag path commits + pushes it onto the plan's branch, the
+               state becomes ``review``, and a ``force_unapproved={identity}`` reconcile
+               pass (run by the caller) de-approves the row — the ONE sanctioned
+               approval removal — and pushes the listing. A diag push that fails even
+               after the ONE retry degrades the outcome to **failure**
+               ``"questions.md push failed"``.
+            4. ``"success"`` → :meth:`_route_success` (tests gate, non-empty diff commit,
+               archive, attempt-branch push). On full success the state is ``success``
+               with ``branch_name`` + ``commit_sha`` — the pushed attempt branch IS the
+               delivery (NO PR, NO GitHub API).
+
+            In every case the state entry is updated via :func:`apply_job_outcome`
+            (``finished_at`` stamped; the result's ``pid`` stored — forensic only), every
+            failure appends a business error naming the repo + identity, and the attempt
+            worktree is removed (finally) with a best-effort delete of the stale local
+            attempt branch.
+
+        Args:
+            ctx: The shared context (sandbox, run_id, logger).
+            job: The finished job (its :attr:`_JobRecord.result` is the outcome input;
+                the caller guarantees it is not None).
+            st: The current state document (mutated in place for the routed entry).
+            errors: The run's business-error list (appended to on every failure outcome
+                and on an unexpected git fault).
+
+        Returns:
+            A ``(state_doc, action_notes, force_identity)`` tuple — the document (mutated
+            in place), the notes (``job finished …`` / the pushed-branch delivery note /
+            diag-retry notes), and the identity to de-approve (``None`` unless the
+            outcome is ``questions`` and the diag push landed — the caller runs the force
+            pass and persists).
+
+        Side Effects:
+            At most one diag worktree (add/remove pair) + one diag commit + one push (two
+            on the ONE retry), at most one tests-gate subprocess, at most one
+            implementation commit + one archive commit + one attempt-branch push, one
+            attempt-worktree removal (ALWAYS, finally).
+        """
+        root = ctx.sandbox_dir / "roadmap-dev"  # noqa: F841 - kept for layout-helper symmetry
+        identity = job.identity
+        plan = job.plan
+        result = job.result
+        assert result is not None  # the drain aborts on a dead worker (result None)
+        actions: list[str] = []
+        entry = st.get("plans", {}).get(identity)
+        if entry is None:
+            errors.append(f"{plan.repo} ({identity}): no state entry for finished job")
+            actions.append(
+                f"job finished {identity} status=error duration={result.duration_seconds:.0f}s"
+            )
+            return st, actions, None
+
+        outcome: str
+        fields: dict = {"pid": result.pid, "last_run_id": ctx.run_id}
+        force_identity: str | None = None
+        diag_file: str | None = None
+        diag_content = ""
+
+        if result.status in {"error", "timeout"}:
+            # 1. Agent-level failure (crash/exit-1/timeout) — auto-retry = the re-arm.
+            reason = f"agent {result.status}: {result.error or result.status}"
+            outcome = "failure"
+            fields["last_error"] = reason
+            diag_file = "failure.md"
+            diag_content = reason
+        else:
+            status_word = job_status_from_report(result.final_text)
+            if status_word is None:
+                # 2a. No mandated status line → the report is uninterpretable.
+                outcome = "failure"
+                fields["last_error"] = "no explicit status line in planner report"
+                diag_file = "failure.md"
+                diag_content = result.final_text or ""
+            elif status_word == "failure":
+                # 2b. The planner reported failure: Blockers → last_error, report → file.
+                sections = extract_report_sections(result.final_text)
+                blockers = sections["blockers"].strip()
+                outcome = "failure"
+                fields["last_error"] = blockers or "planner reported failure"
+                diag_file = "failure.md"
+                diag_content = result.final_text or ""
+            elif status_word == "questions":
+                # 2c. Major questions: the worktree must carry questions.md.
+                qpath = job.wt / Path(plan.topic) / "questions.md"
+                if not qpath.is_file():
+                    outcome = "failure"
+                    fields["last_error"] = "status=questions but no questions.md in worktree"
+                    diag_file = "failure.md"
+                    diag_content = result.final_text or ""
+                else:
+                    outcome = "questions"
+                    force_identity = identity
+                    diag_file = "questions.md"
+                    diag_content = qpath.read_text(encoding="utf-8")
+            else:
+                # 2d. "success" — the delivery pipeline (may degrade to failure).
+                word, success_fields = self._route_success(ctx, job, actions)
+                outcome = word
+                fields.update(success_fields)
+
+        try:
+            # The diag path (questions / failure diagnostics) lands on the plan's branch.
+            if diag_file is not None:
+                if not self._commit_diag(ctx, job, diag_file, diag_content, actions, errors):
+                    # Give up: the outcome degrades (a questions failure.md never lands).
+                    outcome = "failure"
+                    fields["last_error"] = f"{diag_file} push failed"
+            if outcome == "failure":
+                fields = {**fields, "last_error": str(fields.get("last_error") or "failure")[:200]}
+
+            st["plans"][identity] = apply_job_outcome(entry, outcome, now=self._now(), **fields)
+        finally:
+            # ALWAYS: remove the attempt worktree; best-effort delete the local branch.
+            self._best_effort_remove_worktree(ctx, job.clone, job.wt)
+            try:
+                self._git.delete_branch(job.clone, job.branch_name)
+            except GitError:
+                pass  # no local branch (push never happened / already deleted)
+
+        actions.append(
+            f"job finished {identity} status={outcome} duration={result.duration_seconds:.0f}s"
+        )
+        ctx.logger.info(
+            "roadmap-dev: job finished %s status=%s duration=%.0fs",
+            identity,
+            outcome,
+            result.duration_seconds,
+        )
+        if outcome == "success":
+            actions.append(
+                f"pushed branch {job.branch_name} for {plan.repo} @ {plan.branch} "
+                f"({identity}) — human opens the PR"
+            )
+            ctx.logger.info(
+                "roadmap-dev: pushed branch %s for %s @ %s (%s) — human opens the PR",
+                job.branch_name,
+                plan.repo,
+                plan.branch,
+                identity,
+            )
+        elif outcome == "failure":
+            errors.append(f"{plan.repo} ({identity}): {fields['last_error']}")
+        return st, actions, force_identity
+
+    def _force_unapprove(
+        self,
+        ctx,
+        st: dict,
+        errors: list[str],
+        identity: str,
+        rearm_guard: frozenset[str] = frozenset(),
+    ) -> tuple[dict, list[str]]:
+        """Run the ``force_unapproved`` reconcile pass after a ``questions`` outcome.
+
+        Purpose:
+            The ONE sanctioned user-cell overwrite: the plan raised major questions, so
+            its row is de-approved (☐) until the user re-☑'s after answering. A fresh
+            reaper-less re-scan + reconcile with ``force_unapproved={identity}``
+            re-reads the remote listing, flips the approval cell (logged ``unapproved
+            <id> (questions raised)`` by :func:`reconcile`), and pushes the listing when
+            it changed.
+
+        Args:
+            ctx: The shared context.
+            st: The current state document (already at state ``review`` for ``identity``).
+            errors: The run's business-error list (appended to on a listing-push fault).
+            identity: The identity to de-approve.
+            rearm_guard: The drain's routed-so-far identities (forwarded to
+                :func:`reconcile` — this pass re-renders every row, so a just-routed
+                ``failure`` sibling must not self re-arm here either).
+
+        Returns:
+            A ``(new_state_doc, action_notes)`` tuple (the re-scan's notes).
+        """
+        _plans, new_state, _rows, logs = self._scan_and_reconcile_no_reap(
+            ctx,
+            st,
+            errors,
+            force_unapproved=frozenset({identity}),
+            rearm_guard=rearm_guard,
+        )
+        return new_state, logs
+
+    def _drain(self, ctx, plans: list[Plan], st: dict, errors: list[str]) -> tuple[list[str], dict]:
+        """The in-process top-up drain (phase 2/3) — one ``run()`` holds the global lock.
+
+        Purpose:
+            With approved plans queued and an idling box, keep the slots full — 1 by
+            day / 2 by night (``machine.quiet_window``; recomputed every iteration, so a
+            boundary crossing mid-drain is honored) — and top up the moment a job ends
+            (no 30-min dead time between jobs). The user can re-prioritize between jobs
+            (each top-up re-reads the REMOTE table). Per loop:
+
+            - finished jobs are routed (:meth:`_route_job`) and the state is persisted
+              atomically (single lock + atomic save; jobs never touch the state doc);
+              a dead worker (the runner raised) ABORTS the run — its ``pending`` entry
+              (persisted before spawn) stays for the reaper. Routed identities join the
+              ``rearm_guard`` so a just-routed ``failure`` is NOT mistaken for a user
+              re-arm by the drain's own re-scan (the remote row's state cell is stale
+              until the failure row is pushed — without the guard a failed job would
+              re-arm itself and restart forever; a genuine user re-arm in a LATER run
+              still works, the guard is per-drain);
+            - while jobs are in flight: re-scan (reaper-less — in-flight ``pending``
+              entries are NOT orphans) every ``machine.poll_interval_minutes`` to keep
+              the listing live, then wait for at least one job to finish (bounded 15 s
+              join-with-timeout poll);
+            - with nothing in flight: LIVE-probe the gate —
+              ``self._active_session_count() > 0`` → log ``gate closed — no new starts``
+              and end (in-flight jobs ran to completion — no preemption, the rejected
+              alternative) — otherwise re-scan and start up to ``slots`` startable plans
+              (priority order). When none start, the drain ends.
+
+            The re-scan cadence (load-bearing): (a) at drain start the caller's fresh
+            phase 1 IS the scan (the drain receives its fresh plans/state/rows); (b)
+            every subsequent top-up that may start jobs re-scans first (user edits
+            between jobs are honored before each top-up); (c) every
+            ``machine.poll_interval_minutes`` while jobs are in flight. There is
+            deliberately NO overall drain budget — only the per-job
+            ``run_timeout_minutes`` cap (``max_attempts``-style caps are a plan decision
+            to omit).
+
+        Args:
+            ctx: The shared context (``ctx.gate_open`` decided the drain runs at all;
+                the LIVE probe inside decides new starts).
+            plans: The caller's fresh phase-1 scan (the first top-up's table).
+            st: The caller's fresh phase-1 state document (mutated in place under the
+                drain lock; persisted atomically on every transition).
+            errors: The run's business-error list (appended to: per-job failures,
+                listing-push faults, start faults — each names repo/identity).
+
+        Returns:
+            A ``(action_notes, final_state_doc)`` tuple — the notes (``drain start …`` /
+            ``top-up: starting …`` / ``job finished …`` / ``gate closed — no new
+            starts`` / ``drain done …``) and the state document as the drain left it
+            (the reconciler's copy-on-write means the drain's transitions may live in a
+            NEWER document object than the one it received — the caller's final
+            compare-and-save MUST use this return value, never the phase-1 object).
+
+        Side Effects:
+            Worker threads (at most ``slots`` alive at once), per-job worktrees (always
+            removed), one atomic state save per transition, re-scan passes (clone/
+            fetches + at most one listing commit + push each), one live session probe
+            per top-up.
+        """
+        machine = ctx.config.machine
+        actions: list[str] = []
+        lock = threading.Lock()
+        jobs: dict[str, _JobRecord] = {}
+        skip: set[str] = set()  # start failures this drain (reverted to open, not retried)
+        routed: set[str] = set()  # identities routed this drain (the re-arm guard)
+        rows = self._listing_rows(ctx, errors)  # the fresh table for the first top-up
+        last_rescan = self._now()
+        first_topup = True
+
+        slots = self._slots(ctx, self._now())
+        startable = self._select_startable(plans, rows, st, skip)
+        actions.append(f"drain start slots={slots} startable={len(startable)}")
+        ctx.logger.info("roadmap-dev: drain start slots=%d startable=%d", slots, len(startable))
+
+        while True:
+            # --- Reap finished jobs: route outcomes, persist atomically. --- #
+            for job in [j for j in list(jobs.values()) if not j.thread.is_alive()]:
+                if job.result is None:
+                    # A dead worker (the runner raised): the pending entry (persisted
+                    # before spawn) stays for the reaper — abort the run loudly.
+                    detail = f" (runner raised: {job.error})" if job.error else ""
+                    raise RuntimeError(
+                        f"job {job.identity} worker thread died (runner raised){detail}"
+                    )
+                routed.add(job.identity)  # guard against a self re-arm on the re-scan
+                st, job_actions, force_identity = self._route_job(ctx, job, st, errors)
+                actions.extend(job_actions)
+                if force_identity is not None:
+                    st, force_actions = self._force_unapprove(
+                        ctx, st, errors, force_identity, frozenset(routed)
+                    )
+                    actions.extend(force_actions)
+                with lock:
+                    ctx.state.save(_STATE_KEY, st)
+                jobs.pop(job.identity, None)
+
+            if jobs:
+                # --- Jobs in flight: keep the listing live, then wait. --- #
+                if (self._now() - last_rescan) >= timedelta(minutes=machine.poll_interval_minutes):
+                    _plans, st, rows, rescan_logs = self._scan_and_reconcile_no_reap(
+                        ctx, st, errors, rearm_guard=frozenset(routed)
+                    )
+                    actions.extend(rescan_logs)
+                    last_rescan = self._now()
+                    with lock:
+                        ctx.state.save(_STATE_KEY, st)
+                for job in list(jobs.values()):
+                    job.thread.join(timeout=_JOB_JOIN_TIMEOUT_SECONDS)
+                continue  # loop back to the top-up decision
+
+            # --- Nothing in flight: top-up (or end). Re-scan first (user edits
+            #        between jobs are honored), THEN the live gate probe. --- #
+            if not first_topup:
+                plans, st, rows, rescan_logs = self._scan_and_reconcile_no_reap(
+                    ctx, st, errors, rearm_guard=frozenset(routed)
+                )
+                actions.extend(rescan_logs)
+                last_rescan = self._now()
+                with lock:
+                    ctx.state.save(_STATE_KEY, st)
+            first_topup = False
+            if self._active_session_count() > 0:
+                actions.append("gate closed — no new starts")
+                ctx.logger.info("roadmap-dev: gate closed — no new starts (drain ends)")
+                break
+            slots = self._slots(ctx, self._now())
+            startable = self._select_startable(plans, rows, st, skip)
+            to_start = startable[:slots]
+            if not to_start:
+                actions.append(f"drain done (slots={slots} startable={len(startable)})")
+                ctx.logger.info(
+                    "roadmap-dev: drain done (slots=%d startable=%d)", slots, len(startable)
+                )
+                break
+            started = 0
+            for plan in to_start:
+                job = self._start_job(ctx, plan, st, lock, actions, errors, started + 1, slots)
+                if job is None:
+                    skip.add(plan.identity)  # reverted to open — not retried this drain
+                else:
+                    jobs[job.identity] = job
+                    started += 1
+            # loop: the started jobs are now in flight (or the drain re-decides below)
+
+        return actions, st
 
     # --- Run orchestration --------------------------------------------------- #
 
@@ -1835,8 +2877,9 @@ class RoadmapDevWorkflow:
             The scheduler-facing entry point: wrap :meth:`_run` and map any unexpected
             exception to ``status="error"`` (workflows never raise for business failures).
             The run body: no-op on an empty allowlist, else load + validate the state
-            document, run phase 1 (reaper + scan + reconcile + push), append the drain
-            stub note (Task 4), and persist the state when it changed.
+            document, run phase 1 (reaper + scan + reconcile + push), run the idle-gated
+            drain when the gate is open (or append the exact skip note when closed), and
+            persist the state when it changed.
 
         Failure contract:
             Business failures (e.g. a state schema mismatch, a clone/fetch failure, a
@@ -1886,20 +2929,23 @@ class RoadmapDevWorkflow:
         errors: list[str] = []
         plans, new_state, logs = self._scan_and_reconcile(ctx, st, errors)
 
-        # --- 4. Drain (stub until Task 4 — these exact notes are load-bearing for its diff). --- #
-        drain_note = (
-            "drain: not implemented (Task 4)"
-            if ctx.gate_open
-            else "drain skipped (idle gate closed)"
-        )
+        # --- 4. The idle-gated drain (gate open → the top-up drain; gate closed →
+        #        the exact skip note, preserved from Task 3). --- #
+        if ctx.gate_open:
+            drain_notes, final_state = self._drain(ctx, plans, new_state, errors)
+        else:
+            drain_notes, final_state = ["drain skipped (idle gate closed)"], new_state
 
-        # --- 5. Single atomic state save, only when the document changed. --- #
-        if json.dumps(new_state, sort_keys=True) != loaded_snapshot:
-            ctx.state.save(_STATE_KEY, new_state)
+        # --- 5. Final atomic state save, only when the document changed (the drain
+        #        already saves its own transitions; this catches the no-drain path and
+        #        the no-job drain — the save uses the DRAIN's final document, since the
+        #        reconciler's copy-on-write can move transitions into a newer object). --- #
+        if json.dumps(final_state, sort_keys=True) != loaded_snapshot:
+            ctx.state.save(_STATE_KEY, final_state)
 
         return WorkflowResult(
             status="error" if errors else "ok",
             items_found=len(plans),
-            actions=logs + [drain_note],
+            actions=logs + drain_notes,
             errors=errors,
         )
