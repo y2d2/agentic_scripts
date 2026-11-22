@@ -55,15 +55,20 @@ LISTING_SEP = "|----------|----------|------|-------|-------|--------|"
 ROW_UNITEST = "| ☐ | 1 | planning/unitest/work_plan.md | Unit tests | open | ☐ |"
 ROW_ORBIT = "| ☐ | 1 | planning/orbit-sim/work_plan.md | ORBIT sim extension | open | ☐ |"
 ROW_NETFIT = "| ☐ | 1 | planning/netfit/work_plan.md | Netfit | open | ☐ |"
+# The workflow-owned detail rows (Task 1): unitest has no goal/tasks (all-dash cells);
+# orbit-sim carries work_plan_task_1_x.md (tier 3 → task "1 x"), and neither fixture plan
+# has a Purpose/Goal marker (goal "—").
+DETAIL_UNITEST = "| — | — | **Goal:** — | **Tasks:** — | — | — |"
+DETAIL_ORBIT = "| — | — | **Goal:** — | **Tasks:** 1 x | — | — |"
 # NOTE: no trailing newline — :meth:`Git.show_file` (used by ``_remote_listing``) rstrips
 # the file's trailing newline(s); the file on the remote carries exactly one (the renderer
 # emits one).
 EXPECTED_RUN1 = (
     f"# https://github.com/{FIXTURE_REPO}.git\n"
     "## dev\n"
-    f"{LISTING_HEADER}\n{LISTING_SEP}\n{ROW_UNITEST}\n"
+    f"{LISTING_HEADER}\n{LISTING_SEP}\n{ROW_UNITEST}\n{DETAIL_UNITEST}\n"
     "## main\n"
-    f"{LISTING_HEADER}\n{LISTING_SEP}\n{ROW_ORBIT}"
+    f"{LISTING_HEADER}\n{LISTING_SEP}\n{ROW_ORBIT}\n{DETAIL_ORBIT}"
 )
 
 QUIET = logging.getLogger("test.roadmap_dev_scan")
