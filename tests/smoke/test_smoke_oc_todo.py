@@ -53,8 +53,6 @@ def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: P
         "log_dir": str(log_dir),
         "sandbox_dir": str(sandbox_dir),
     }
-    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
-    data["roadmap_prompts"]["allowed_repos"] = []
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return cfg_path
@@ -134,12 +132,12 @@ def test_smoke_oc_todo_registered_noop(tmp_path: Path) -> None:
 
 
 def test_smoke_oc_todo_gate_closed_noop(tmp_path: Path) -> None:
-    """Gate-closed run → exit 0, CLOSED verdict, no repo touched (no sandbox dir, no state).
+    """Gate-closed run → exit 0, CLOSED verdict, blanket skip, no repo touched.
 
-    With ``roadmap-dev`` shipped enabled (Task 6, ``gate: idle``), a quiet-gate-closed run
-    still enters the workflow loop: oc-todo (a quiet-gate sibling) is SKIPPED and touches
-    no repo, while the inert roadmap-dev entry no-ops — so the run ends ``overall: ok``
-    (it no longer blanket-skips to ``overall: skipped``).
+    The shipped config carries only quiet-gate workflows, so a closed quiet gate
+    blanket-skips the whole run (early return): no workflow is invoked at all —
+    oc-todo never even reaches its own no-repos path — and the run ends
+    ``overall: skipped`` without touching any repo.
     """
     cfg, dirs = _workspace(tmp_path)
 
@@ -152,13 +150,13 @@ def test_smoke_oc_todo_gate_closed_noop(tmp_path: Path) -> None:
     assert code == 0
     log_text = _run_logs(dirs["logs"])[0].read_text(encoding="utf-8")
     assert "verdict=CLOSED" in log_text
-    # oc-todo is skipped by the closed quiet gate (never reaches its own no-repos path).
-    assert "WORKFLOW oc-todo status=skipped reason=quiet gate closed" in log_text
+    # Blanket skip: no workflow ran, so the run log carries no WORKFLOW lines.
+    assert "WORKFLOW" not in log_text
 
     last = _last_run(dirs["logs"])
-    assert "overall: ok" in last
+    assert "overall: skipped" in last
 
-    # With the gate closed, oc-todo exits as a skip without touching any repo.
+    # With the gate closed, nothing touches any repo.
     assert not (dirs["sandbox"] / "oc-todo").exists()
     assert not (dirs["state"] / "oc-todo.json").exists()
 
@@ -175,8 +173,6 @@ def test_smoke_oc_todo_config_fault(tmp_path: Path, capsys: pytest.CaptureFixtur
         "log_dir": str(dirs["logs"]),
         "sandbox_dir": str(dirs["sandbox"]),
     }
-    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
-    data["roadmap_prompts"]["allowed_repos"] = []
     data["oc_todo"]["repos"] = ["no-slash"]  # not an owner/name id → config fault
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
@@ -200,8 +196,6 @@ def test_smoke_oc_todo_empty_repo_list_no_agent(tmp_path: Path) -> None:
         "log_dir": str(dirs["logs"]),
         "sandbox_dir": str(dirs["sandbox"]),
     }
-    # hermetic: shipped allowlist is seeded; tests exercise gate/scheduler behavior, not scanning
-    data["roadmap_prompts"]["allowed_repos"] = []
     data["oc_todo"]["repos"] = []  # explicit empty list (the shipped value, made explicit)
     cfg_path = tmp_path / "workflows.yaml"
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")

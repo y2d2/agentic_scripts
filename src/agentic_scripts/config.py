@@ -228,63 +228,6 @@ _EMPTY_OC_TODO = OCTodo(
 )
 
 
-# Default per-job hard timeout (minutes) for roadmap-dev execution runs.
-DEFAULT_RUN_TIMEOUT_MINUTES = 480
-
-
-@dataclass(frozen=True)
-class RoadmapPrompts:
-    """Roadmap-dev workflow execution parameters (repos to scan, listing, caps).
-
-    Attributes:
-        allowed_repos: Ordered list of GitHub repo ids in ``owner/name`` form to scan for
-            un-archived plans. An empty list means the workflow has nothing to scan and
-            no-ops for that run.
-        listing_repo: The live plan-listing repo as ``owner/name`` (e.g.
-            ``y2d2/ARP_prompts``); empty string when the section is absent.
-        listing_repo_url: Optional clone-URL override for the listing repo (a local path
-            or URL; the hermetic-test/mirror seam). Empty string (default) derives
-            ``git@github.com:<listing_repo>.git``.
-        listing_path: The listing file inside the listing repo (e.g. ``plans.md``).
-            Empty string when the section is absent.
-        listing_branch: The branch holding the listing (e.g. ``main``). Empty string when
-            the section is absent.
-        run_timeout_minutes: Per-job hard timeout for an execution run in minutes. Must be
-            an int >= 1; defaults to :data:`DEFAULT_RUN_TIMEOUT_MINUTES`.
-        test_commands: Optional per-repo test command (e.g. ``"uv run pytest"``). Keys must
-            be members of :attr:`allowed_repos`; values are non-empty strings. Empty when
-            no overrides are configured.
-        repo_urls: Optional clone-URL override per repo (a local path or a URL; the
-            hermetic-test/mirror seam). Keys must be members of :attr:`allowed_repos`;
-            values are non-empty strings. Empty when no overrides are configured.
-
-    Note:
-        An empty ``allowed_repos`` list means the workflow no-ops: there is nothing to
-        scan, so the run exits 0 without any state file or sandbox.
-    """
-
-    allowed_repos: list[str]
-    listing_repo: str
-    listing_repo_url: str
-    listing_path: str
-    listing_branch: str
-    run_timeout_minutes: int
-    test_commands: dict[str, str]
-    repo_urls: dict[str, str]
-
-
-_EMPTY_ROADMAP_PROMPTS = RoadmapPrompts(
-    allowed_repos=[],
-    listing_repo="",
-    listing_repo_url="",
-    listing_path="",
-    listing_branch="",
-    run_timeout_minutes=DEFAULT_RUN_TIMEOUT_MINUTES,
-    test_commands={},
-    repo_urls={},
-)
-
-
 @dataclass(frozen=True)
 class Config:
     """The fully validated, typed agentic_scripts configuration.
@@ -297,8 +240,6 @@ class Config:
         workflows: Registered workflow entries, preserving YAML document order.
         oc_todo: OC-todo workflow settings; empty defaults when the ``oc_todo`` section
             is absent.
-        roadmap_prompts: Roadmap-dev execution parameters; empty defaults when the
-            ``roadmap_prompts`` section is absent (the workflow no-ops).
     """
 
     machine: Machine
@@ -307,7 +248,6 @@ class Config:
     admin_repo: Path | None
     workflows: list[WorkflowEntry]
     oc_todo: OCTodo = field(default_factory=lambda: _EMPTY_OC_TODO)
-    roadmap_prompts: RoadmapPrompts = field(default_factory=lambda: _EMPTY_ROADMAP_PROMPTS)
 
 
 def _parse_hhmm(value: Any, field: str) -> time:
@@ -648,93 +588,6 @@ def _load_oc_todo(data: dict[str, Any]) -> OCTodo:
     )
 
 
-def _load_roadmap_prompts(data: dict[str, Any]) -> RoadmapPrompts:
-    """Validate and build the optional ``roadmap_prompts`` section.
-
-    Args:
-        data: The raw mapping under the ``roadmap_prompts`` key (already confirmed to be
-            a mapping by the caller via :func:`_require_mapping`).
-
-    Returns:
-        A validated :class:`RoadmapPrompts`.
-
-    Raises:
-        ConfigError: If any field is invalid — each error names the offending dotted
-            field (e.g. ``roadmap_prompts.allowed_repos[0]``,
-            ``roadmap_prompts.listing_repo``, ``roadmap_prompts.test_commands.owner/name``).
-    """
-    section = "roadmap_prompts"
-
-    # allowed_repos: required key in the section (present but may be []); a list of
-    # owner/name ids (same regex as oc_todo). Empty = the workflow no-ops.
-    raw_repos = _require_key(section, data, "allowed_repos")
-    if not isinstance(raw_repos, list):
-        raise ConfigError(f"{section}.allowed_repos", "must be a list of 'owner/name' repo ids")
-    allowed_repos: list[str] = []
-    for i, entry in enumerate(raw_repos):
-        field_name = f"{section}.allowed_repos[{i}]"
-        if not isinstance(entry, str) or not _REPO_ID_RE.match(entry):
-            raise ConfigError(field_name, "must be a 'owner/name' repo id")
-        allowed_repos.append(entry)
-
-    # listing_repo: required key when the section is present; 'owner/name'.
-    listing_repo = _require_key(section, data, "listing_repo")
-    if not isinstance(listing_repo, str) or not _REPO_ID_RE.match(listing_repo):
-        raise ConfigError(f"{section}.listing_repo", "must be a 'owner/name' repo id")
-
-    # listing_repo_url: optional; a string ("" = derive git@github.com:<listing_repo>.git;
-    # non-empty = clone-URL override, e.g. a local fixture in hermetic tests).
-    listing_repo_url = data.get("listing_repo_url", "")
-    if not isinstance(listing_repo_url, str):
-        raise ConfigError(f"{section}.listing_repo_url", "must be a string ('' or a URL)")
-
-    # listing_path / listing_branch: required keys; non-empty strings.
-    listing_path = _require_key(section, data, "listing_path")
-    if not isinstance(listing_path, str) or not listing_path.strip():
-        raise ConfigError(f"{section}.listing_path", "must be a non-empty string")
-
-    listing_branch = _require_key(section, data, "listing_branch")
-    if not isinstance(listing_branch, str) or not listing_branch.strip():
-        raise ConfigError(f"{section}.listing_branch", "must be a non-empty string")
-
-    # run_timeout_minutes: optional; default DEFAULT_RUN_TIMEOUT_MINUTES; int >= 1.
-    run_timeout = data.get("run_timeout_minutes", DEFAULT_RUN_TIMEOUT_MINUTES)
-    if not isinstance(run_timeout, int) or isinstance(run_timeout, bool):
-        raise ConfigError(f"{section}.run_timeout_minutes", "must be an integer")
-    if run_timeout < 1:
-        raise ConfigError(f"{section}.run_timeout_minutes", "must be >= 1")
-
-    # test_commands / repo_urls: optional; default {}; keys must be in allowed_repos,
-    # values non-empty strings (same pattern as oc_todo).
-    def _load_repo_map(key: str) -> dict[str, str]:
-        raw = data.get(key, {})
-        if not isinstance(raw, dict):
-            raise ConfigError(f"{section}.{key}", "must be a mapping of repo -> string")
-        out: dict[str, str] = {}
-        for repo, value in raw.items():
-            field_name = f"{section}.{key}.{repo}"
-            if repo not in allowed_repos:
-                raise ConfigError(field_name, "repo is not in roadmap_prompts.allowed_repos")
-            if not isinstance(value, str) or not value.strip():
-                raise ConfigError(field_name, "must be a non-empty string")
-            out[repo] = value
-        return out
-
-    test_commands = _load_repo_map("test_commands")
-    repo_urls = _load_repo_map("repo_urls")
-
-    return RoadmapPrompts(
-        allowed_repos=allowed_repos,
-        listing_repo=listing_repo,
-        listing_repo_url=listing_repo_url,
-        listing_path=listing_path,
-        listing_branch=listing_branch,
-        run_timeout_minutes=run_timeout,
-        test_commands=test_commands,
-        repo_urls=repo_urls,
-    )
-
-
 def load_config(path: Path) -> Config:
     """Read and validate the canonical agentic_scripts configuration file.
 
@@ -745,9 +598,8 @@ def load_config(path: Path) -> Config:
     Returns:
         A fully validated :class:`Config`. Relative ``paths.*`` values are resolved
         against :data:`PROJECT_ROOT`; ``workflows`` preserves YAML document order; the
-        optional ``oc_todo`` and ``roadmap_prompts`` sections load into
-        :attr:`Config.oc_todo` / :attr:`Config.roadmap_prompts` (empty defaults when
-        absent).
+        optional ``oc_todo`` section loads into :attr:`Config.oc_todo` (empty defaults
+        when absent).
 
     Raises:
         ConfigError: If the file is missing, not valid YAML, has an unknown or
@@ -778,7 +630,6 @@ def load_config(path: Path) -> Config:
         "admin_repo",
         "workflows",
         "oc_todo",
-        "roadmap_prompts",
     }
     for key in raw:
         if key not in allowed_sections:
@@ -808,14 +659,6 @@ def load_config(path: Path) -> Config:
     else:
         oc_todo = _EMPTY_OC_TODO
 
-    roadmap_prompts_raw = raw.get("roadmap_prompts")  # optional; empty defaults when absent
-    if roadmap_prompts_raw is not None:
-        roadmap_prompts = _load_roadmap_prompts(
-            _require_mapping("roadmap_prompts", roadmap_prompts_raw)
-        )
-    else:
-        roadmap_prompts = _EMPTY_ROADMAP_PROMPTS
-
     return Config(
         machine=machine,
         agent=agent,
@@ -823,5 +666,4 @@ def load_config(path: Path) -> Config:
         admin_repo=admin_repo,
         workflows=workflows,
         oc_todo=oc_todo,
-        roadmap_prompts=roadmap_prompts,
     )
