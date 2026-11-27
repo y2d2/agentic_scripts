@@ -3,7 +3,7 @@
 ### planning/setup-sh-submodules/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/setup-sh-submodules/work_plan.md | Task Plan: setup.sh, submodules, pyproject, README | open | ☐ |
+| ☐ | 3 | planning/setup-sh-submodules/work_plan.md | Task Plan: setup.sh, submodules, pyproject, README | open | ☐ |
 
 | details |
 |---------|
@@ -13,7 +13,7 @@
 ### planning/setup-sh-submodules/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/setup-sh-submodules/work_plan.md | Task Plan: setup.sh, submodules, pyproject, README | open | ☐ |
+| ☐ | 3 | planning/setup-sh-submodules/work_plan.md | Task Plan: setup.sh, submodules, pyproject, README | open | ☐ |
 
 | details |
 |---------|
@@ -24,7 +24,7 @@
 ### planning/arp-imu-active-measurements/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/arp-imu-active-measurements/work_plan.md | Implementation Plan: ARP_IMU Active Measurements | open | ☐ |
+| ☐ | 3 | planning/arp-imu-active-measurements/work_plan.md | Implementation Plan: ARP_IMU Active Measurements | open | ☐ |
 
 | details |
 |---------|
@@ -35,7 +35,7 @@
 ### planning/observation-tokenisation/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/observation-tokenisation/work_plan.md | Task Plan: Observation Tokenisation | open | ☐ |
+| ☐ | 3 | planning/observation-tokenisation/work_plan.md | Task Plan: Observation Tokenisation | open | ☐ |
 
 | details |
 |---------|
@@ -46,7 +46,7 @@
 ### planning/repo-review-2026-11-17/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/repo-review-2026-11-17/work_plan.md | Work Plan: Repo review — verify findings, then fix | open | ☐ |
+| ☐ | 3 | planning/repo-review-2026-11-17/work_plan.md | Work Plan: Repo review — verify findings, then fix | open | ☐ |
 
 | details |
 |---------|
@@ -57,7 +57,7 @@
 ### planning/orbit-dmp-unification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 6 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
+| ☐ | 11 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
 
 | details |
 |---------|
@@ -66,7 +66,7 @@
 ### planning/orbit-email-lists-per-wp/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/orbit-email-lists-per-wp/work_plan.md | Work plan — ORBIT e-mail lists per WP | open | ☐ |
+| ☐ | 12 | planning/orbit-email-lists-per-wp/work_plan.md | Work plan — ORBIT e-mail lists per WP | open | ☐ |
 
 | details |
 |---------|
@@ -75,7 +75,7 @@
 ### planning/orbit-people-update/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
+| ☐ | 13 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
 
 | details |
 |---------|
@@ -84,7 +84,7 @@
 ### planning/orbit-plenary-i-slides/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 9 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+| ☐ | 14 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
 
 | details |
 |---------|
@@ -93,7 +93,7 @@
 ### planning/unitree-vault-note/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 10 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
+| ☐ | 15 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
 
 | details |
 |---------|
@@ -103,7 +103,7 @@
 ### planning/esa-bt-gate0-slide/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 12 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
+| ☐ | 23 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
 
 | details |
 |---------|
@@ -112,7 +112,7 @@
 ### planning/esa-no-open-source/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 13 | planning/esa-no-open-source/work_plan.md | Work plan — ESA OSIP: drop open-source commitment | open | ☐ |
+| ☐ | 24 | planning/esa-no-open-source/work_plan.md | Work plan — ESA OSIP: drop open-source commitment | open | ☐ |
 
 | details |
 |---------|
@@ -121,7 +121,7 @@
 ### planning/orbit-demo1-visual/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 14 | planning/orbit-demo1-visual/work_plan.md | Work plan — ORBIT Demonstrator 1, Scenario B visual | open | ☐ |
+| ☐ | 25 | planning/orbit-demo1-visual/work_plan.md | Work plan — ORBIT Demonstrator 1, Scenario B visual | open | ☐ |
 
 | details |
 |---------|
@@ -130,7 +130,7 @@
 ### planning/orbit-dmp-unification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 15 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
+| ☐ | 26 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
 
 | details |
 |---------|
@@ -139,7 +139,7 @@
 ### planning/orbit-dmp/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 16 | planning/orbit-dmp/work_plan.md | Task Plan: ORBIT DMP v0 — consortium data management plan | open | ☐ |
+| ☐ | 27 | planning/orbit-dmp/work_plan.md | Task Plan: ORBIT DMP v0 — consortium data management plan | open | ☐ |
 
 | details |
 |---------|
@@ -148,7 +148,7 @@
 ### planning/orbit-email-lists-per-wp/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 17 | planning/orbit-email-lists-per-wp/work_plan.md | Work plan — ORBIT e-mail lists per WP | open | ☐ |
+| ☐ | 28 | planning/orbit-email-lists-per-wp/work_plan.md | Work plan — ORBIT e-mail lists per WP | open | ☐ |
 
 | details |
 |---------|
@@ -157,7 +157,7 @@
 ### planning/orbit-people-update/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 18 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
+| ☐ | 29 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
 
 | details |
 |---------|
@@ -166,7 +166,7 @@
 ### planning/orbit-plenary-i-slides/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 19 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+| ☐ | 30 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
 
 | details |
 |---------|
@@ -175,7 +175,7 @@
 ### planning/orbit-rob-kickoff-slides/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 20 | planning/orbit-rob-kickoff-slides/work_plan.md | Task Plan: ORBIT ROB kick-off presentation (drafts) | open | ☐ |
+| ☐ | 31 | planning/orbit-rob-kickoff-slides/work_plan.md | Task Plan: ORBIT ROB kick-off presentation (drafts) | open | ☐ |
 
 | details |
 |---------|
@@ -184,7 +184,7 @@
 ### planning/orbit-rob-kickoff-workshop-notes/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 21 | planning/orbit-rob-kickoff-workshop-notes/work_plan.md | Work plan — ORBIT ROB kick-off workshop notes (Autonomous Navigation, group 2) | open | ☐ |
+| ☐ | 32 | planning/orbit-rob-kickoff-workshop-notes/work_plan.md | Work plan — ORBIT ROB kick-off workshop notes (Autonomous Navigation, group 2) | open | ☐ |
 
 | details |
 |---------|
@@ -193,7 +193,7 @@
 ### planning/unitree-vault-note/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 22 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
+| ☐ | 33 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
 
 | details |
 |---------|
@@ -203,7 +203,7 @@
 ### planning/esa-bt-gate0-slide/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 10 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
+| ☐ | 19 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
 
 | details |
 |---------|
@@ -212,7 +212,7 @@
 ### planning/esa-no-open-source/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 11 | planning/esa-no-open-source/work_plan.md | Work plan — ESA OSIP: drop open-source commitment | open | ☐ |
+| ☐ | 20 | planning/esa-no-open-source/work_plan.md | Work plan — ESA OSIP: drop open-source commitment | open | ☐ |
 
 | details |
 |---------|
@@ -221,12 +221,67 @@
 ### planning/orbit-demo1-visual/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 12 | planning/orbit-demo1-visual/work_plan.md | Work plan — ORBIT Demonstrator 1, Scenario B visual | open | ☐ |
+| ☐ | 21 | planning/orbit-demo1-visual/work_plan.md | Work plan — ORBIT Demonstrator 1, Scenario B visual | open | ☐ |
 
 | details |
 |---------|
 | **Goal:** —<br>**Tasks:**<br>1 TikZ schematic of 2027 Scenario B, render PDF + PNG, visual check<br>2 teaser illustration, robot B = Unitree G1 humanoid |
 
+### planning/orbit-dmp-unification/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 22 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Merge the 5 partner responses in `projects/ORBIT/DMP Questionnaire ORBIT.xlsx` (Google Forms export) into a single, unified Markdown document that keeps per-research-group specifics and tracks every dataset.<br>**Tasks:**<br>1 Create the unified DMP Markdown document |
+
+### planning/orbit-dmp/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 23 | planning/orbit-dmp/work_plan.md | Task Plan: ORBIT DMP v0 — consortium data management plan | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first consortium DMP, in five sequential sub-agent tasks.<br>**Tasks:**<br>1 Skeleton & front matter (no dependencies)<br>2 Master table 1 (depends on #1)<br>3 Supporting tables 2–6 (depends on #2)<br>4 Minimal prose + Coera/IP text (depends on #3)<br>5 QA pass (depends on #4)<br>6 Coera removal + ethics commission (depends on #5; user-directed change 2026-11-10)<br>7 brubotics-hamed label → VUB-IMS-confidential (depends on #6; user-directed change 2026-11-10)<br>8 add IDLab-IWIN to consortium list (depends on #7; user-directed change 2026-11-10)<br>9 IDLab-IWIN → IDLab-IWINE (depends on #8; verified externally 2026-11-16)<br>10 Table 1 — drop Label & Storage & backup columns (depends on #9; user-directed 2026-11-16)<br>11 EM entries → EM-IWINE (depends on #10; user-directed 2026-11-16)<br>12 Dataset IDs in Table 1, cross-referenced in Tables 2–6 (depends on #11; user-approved 2026-11-16)<br>13 §6 — drop IPTA sentence, use dataset IDs (depends on #12; user-directed 2026-11-16)<br>14 Remove Miluv dataset, keep new robot localisation dataset B2 (depends on #13; user-directed 2026-11-16)<br>15 Data IDs as first column in Tables 2–6 (depends on #14; user-directed 2026-11-16)<br>16 Renumber B IDs, unify table inputs, full ID coverage (depends on #15; user-directed 2026-11-18)<br>17 Funding scheme imec PROSPECT (depends on #16; user-confirmed 2026-11-18)<br>18 Remove section 6 (depends on #17; user-directed 2026-11-18)<br>19 Plain "Reused" in Table 1 (depends on #18; user-directed 2026-11-18)<br>20 Move C5 to A8, renumber C6 → C5 (depends on #19; user-directed 2026-11-18) |
+
+### planning/orbit-email-lists-per-wp/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 24 | planning/orbit-email-lists-per-wp/work_plan.md | Work plan — ORBIT e-mail lists per WP | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Move the per-WP copy-paste e-mail lines in `projects/ORBIT/ORBIT_people_per_WP.md` from the separate "## E-mail lists" section into each WP section; keep one "All" line.<br>**Tasks:**<br>1 relocate e-mail lists |
+
+### planning/orbit-people-update/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 25 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Update `projects/ORBIT/ORBIT_people_per_WP.md` with staffing changes since 13 Oct 2026.<br>**Tasks:**<br>1 Rewrite file + commit |
+
+### planning/orbit-plenary-i-slides/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 26 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** —<br>**Tasks:**<br>9 outcomes report<br>10 cleaned deck |
+
+### planning/unitree-vault-note/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 27 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Persist a short, clean note in the ORBIT vault documenting the Unitree G1/Go2 configuration FARI put in the tender (PROC 1), with mail provenance tags.<br>**Tasks:**<br>1 Create the vault note<br>2 Commit + push the note (depends on #1) |
+
+## oc/orbit-dmp-plan
 ### planning/orbit-dmp-unification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
@@ -245,19 +300,10 @@
 |---------|
 | **Goal:** Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first consortium DMP, in five sequential sub-agent tasks.<br>**Tasks:**<br>1 Skeleton & front matter (no dependencies)<br>2 Master table 1 (depends on #1)<br>3 Supporting tables 2–6 (depends on #2)<br>4 Minimal prose + Coera/IP text (depends on #3)<br>5 QA pass (depends on #4)<br>6 Coera removal + ethics commission (depends on #5; user-directed change 2026-11-10)<br>7 brubotics-hamed label → VUB-IMS-confidential (depends on #6; user-directed change 2026-11-10)<br>8 add IDLab-IWIN to consortium list (depends on #7; user-directed change 2026-11-10)<br>9 IDLab-IWIN → IDLab-IWINE (depends on #8; verified externally 2026-11-16)<br>10 Table 1 — drop Label & Storage & backup columns (depends on #9; user-directed 2026-11-16)<br>11 EM entries → EM-IWINE (depends on #10; user-directed 2026-11-16)<br>12 Dataset IDs in Table 1, cross-referenced in Tables 2–6 (depends on #11; user-approved 2026-11-16)<br>13 §6 — drop IPTA sentence, use dataset IDs (depends on #12; user-directed 2026-11-16)<br>14 Remove Miluv dataset, keep new robot localisation dataset B2 (depends on #13; user-directed 2026-11-16)<br>15 Data IDs as first column in Tables 2–6 (depends on #14; user-directed 2026-11-16)<br>16 Renumber B IDs, unify table inputs, full ID coverage (depends on #15; user-directed 2026-11-18)<br>17 Funding scheme imec PROSPECT (depends on #16; user-confirmed 2026-11-18)<br>18 Remove section 6 (depends on #17; user-directed 2026-11-18)<br>19 Plain "Reused" in Table 1 (depends on #18; user-directed 2026-11-18)<br>20 Move C5 to A8, renumber C6 → C5 (depends on #19; user-directed 2026-11-18) |
 
-### planning/orbit-email-lists-per-wp/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 15 | planning/orbit-email-lists-per-wp/work_plan.md | Work plan — ORBIT e-mail lists per WP | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** Move the per-WP copy-paste e-mail lines in `projects/ORBIT/ORBIT_people_per_WP.md` from the separate "## E-mail lists" section into each WP section; keep one "All" line.<br>**Tasks:**<br>1 relocate e-mail lists |
-
 ### planning/orbit-people-update/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 16 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
+| ☐ | 15 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
 
 | details |
 |---------|
@@ -266,11 +312,20 @@
 ### planning/orbit-plenary-i-slides/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 17 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+| ☐ | 16 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
 
 | details |
 |---------|
 | **Goal:** —<br>**Tasks:**<br>9 outcomes report<br>10 cleaned deck |
+
+### planning/todos-sync-20261109/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 17 | planning/todos-sync-20261109/work_plan.md | Work Plan: Todos sync 2026-11-09 — archive completed items + update active todos from new mail | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Move all 22 completed (`[x]`) items out of `todos/active.md` into `todos/done.md`, then fold the 33 new mail messages (2026-11-04 → 2026-11-09) into `todos/active.md` as provenance-tagged updates/new lines, and commit + push the two todo files.<br>**Tasks:**<br>1 Move 22 checked items to `todos/done.md`<br>2 Update `todos/active.md` from the 33 new mails<br>3 Commit + push the two todo files |
 
 ### planning/unitree-vault-note/work_plan.md
 | approval | priority | plan | title | state | remove |
@@ -281,66 +336,11 @@
 |---------|
 | **Goal:** Persist a short, clean note in the ORBIT vault documenting the Unitree G1/Go2 configuration FARI put in the tender (PROC 1), with mail provenance tags.<br>**Tasks:**<br>1 Create the vault note<br>2 Commit + push the note (depends on #1) |
 
-## oc/orbit-dmp-plan
-### planning/orbit-dmp-unification/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** Merge the 5 partner responses in `projects/ORBIT/DMP Questionnaire ORBIT.xlsx` (Google Forms export) into a single, unified Markdown document that keeps per-research-group specifics and tracks every dataset.<br>**Tasks:**<br>1 Create the unified DMP Markdown document |
-
-### planning/orbit-dmp/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/orbit-dmp/work_plan.md | Task Plan: ORBIT DMP v0 — consortium data management plan | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first consortium DMP, in five sequential sub-agent tasks.<br>**Tasks:**<br>1 Skeleton & front matter (no dependencies)<br>2 Master table 1 (depends on #1)<br>3 Supporting tables 2–6 (depends on #2)<br>4 Minimal prose + Coera/IP text (depends on #3)<br>5 QA pass (depends on #4)<br>6 Coera removal + ethics commission (depends on #5; user-directed change 2026-11-10)<br>7 brubotics-hamed label → VUB-IMS-confidential (depends on #6; user-directed change 2026-11-10)<br>8 add IDLab-IWIN to consortium list (depends on #7; user-directed change 2026-11-10)<br>9 IDLab-IWIN → IDLab-IWINE (depends on #8; verified externally 2026-11-16)<br>10 Table 1 — drop Label & Storage & backup columns (depends on #9; user-directed 2026-11-16)<br>11 EM entries → EM-IWINE (depends on #10; user-directed 2026-11-16)<br>12 Dataset IDs in Table 1, cross-referenced in Tables 2–6 (depends on #11; user-approved 2026-11-16)<br>13 §6 — drop IPTA sentence, use dataset IDs (depends on #12; user-directed 2026-11-16)<br>14 Remove Miluv dataset, keep new robot localisation dataset B2 (depends on #13; user-directed 2026-11-16)<br>15 Data IDs as first column in Tables 2–6 (depends on #14; user-directed 2026-11-16)<br>16 Renumber B IDs, unify table inputs, full ID coverage (depends on #15; user-directed 2026-11-18)<br>17 Funding scheme imec PROSPECT (depends on #16; user-confirmed 2026-11-18)<br>18 Remove section 6 (depends on #17; user-directed 2026-11-18)<br>19 Plain "Reused" in Table 1 (depends on #18; user-directed 2026-11-18)<br>20 Move C5 to A8, renumber C6 → C5 (depends on #19; user-directed 2026-11-18) |
-
-### planning/orbit-people-update/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 9 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** Update `projects/ORBIT/ORBIT_people_per_WP.md` with staffing changes since 13 Oct 2026.<br>**Tasks:**<br>1 Rewrite file + commit |
-
-### planning/orbit-plenary-i-slides/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 10 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** —<br>**Tasks:**<br>9 outcomes report<br>10 cleaned deck |
-
-### planning/todos-sync-20261109/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 11 | planning/todos-sync-20261109/work_plan.md | Work Plan: Todos sync 2026-11-09 — archive completed items + update active todos from new mail | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** Move all 22 completed (`[x]`) items out of `todos/active.md` into `todos/done.md`, then fold the 33 new mail messages (2026-11-04 → 2026-11-09) into `todos/active.md` as provenance-tagged updates/new lines, and commit + push the two todo files.<br>**Tasks:**<br>1 Move 22 checked items to `todos/done.md`<br>2 Update `todos/active.md` from the 33 new mails<br>3 Commit + push the two todo files |
-
-### planning/unitree-vault-note/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 12 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** Persist a short, clean note in the ORBIT vault documenting the Unitree G1/Go2 configuration FARI put in the tender (PROC 1), with mail provenance tags.<br>**Tasks:**<br>1 Create the vault note<br>2 Commit + push the note (depends on #1) |
-
 ## orbit-demo1-visual
 ### planning/orbit-demo1-visual/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/orbit-demo1-visual/work_plan.md | Work plan — ORBIT Demonstrator 1, Scenario B visual | open | ☐ |
+| ☐ | 13 | planning/orbit-demo1-visual/work_plan.md | Work plan — ORBIT Demonstrator 1, Scenario B visual | open | ☐ |
 
 | details |
 |---------|
@@ -349,7 +349,7 @@
 ### planning/orbit-dmp-unification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
+| ☐ | 14 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
 
 | details |
 |---------|
@@ -358,7 +358,7 @@
 ### planning/orbit-people-update/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 9 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
+| ☐ | 15 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
 
 | details |
 |---------|
@@ -367,7 +367,7 @@
 ### planning/orbit-plenary-i-slides/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 10 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+| ☐ | 16 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
 
 | details |
 |---------|
@@ -376,7 +376,7 @@
 ### planning/todos-sync-20261109/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 11 | planning/todos-sync-20261109/work_plan.md | Work Plan: Todos sync 2026-11-09 — archive completed items + update active todos from new mail | open | ☐ |
+| ☐ | 17 | planning/todos-sync-20261109/work_plan.md | Work Plan: Todos sync 2026-11-09 — archive completed items + update active todos from new mail | open | ☐ |
 
 | details |
 |---------|
@@ -385,7 +385,7 @@
 ### planning/unitree-vault-note/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 12 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
+| ☐ | 18 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
 
 | details |
 |---------|
@@ -396,7 +396,7 @@
 ### planning/basic-usage-notebook/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 5 | planning/basic-usage-notebook/work_plan.md | Work Plan: Basic-usage Jupyter notebook | open | ☐ |
+| ☐ | 9 | planning/basic-usage-notebook/work_plan.md | Work Plan: Basic-usage Jupyter notebook | open | ☐ |
 
 | details |
 |---------|
@@ -405,7 +405,7 @@
 ### planning/code-review-fixes/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 6 | planning/code-review-fixes/work_plan.md | Task Plan: Code-review findings — verify & fix | open | ☐ |
+| ☐ | 10 | planning/code-review-fixes/work_plan.md | Task Plan: Code-review findings — verify & fix | open | ☐ |
 
 | details |
 |---------|
@@ -414,7 +414,7 @@
 ### planning/python-3.12-upgrade/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/python-3.12-upgrade/work_plan.md | Task Plan: Move project from Python 3.11 to 3.12 | open | ☐ |
+| ☐ | 11 | planning/python-3.12-upgrade/work_plan.md | Task Plan: Move project from Python 3.11 to 3.12 | open | ☐ |
 
 | details |
 |---------|
@@ -423,7 +423,7 @@
 ### planning/repo-cleanup/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/repo-cleanup/work_plan.md | Work Plan: Repo Cleanup (remove SGal3_filters, deprecated modules, stray files; README mermaid rewrite) | open | ☐ |
+| ☐ | 12 | planning/repo-cleanup/work_plan.md | Work Plan: Repo Cleanup (remove SGal3_filters, deprecated modules, stray files; README mermaid rewrite) | open | ☐ |
 
 | details |
 |---------|
@@ -433,7 +433,7 @@
 ### planning/basic-usage-notebook/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 5 | planning/basic-usage-notebook/work_plan.md | Work Plan: Basic-usage Jupyter notebook | open | ☐ |
+| ☐ | 9 | planning/basic-usage-notebook/work_plan.md | Work Plan: Basic-usage Jupyter notebook | open | ☐ |
 
 | details |
 |---------|
@@ -442,7 +442,7 @@
 ### planning/code-review-fixes/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 6 | planning/code-review-fixes/work_plan.md | Task Plan: Code-review findings — verify & fix | open | ☐ |
+| ☐ | 10 | planning/code-review-fixes/work_plan.md | Task Plan: Code-review findings — verify & fix | open | ☐ |
 
 | details |
 |---------|
@@ -451,7 +451,7 @@
 ### planning/python-3.12-upgrade/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/python-3.12-upgrade/work_plan.md | Task Plan: Move project from Python 3.11 to 3.12 | open | ☐ |
+| ☐ | 11 | planning/python-3.12-upgrade/work_plan.md | Task Plan: Move project from Python 3.11 to 3.12 | open | ☐ |
 
 | details |
 |---------|
@@ -460,7 +460,7 @@
 ### planning/repo-cleanup/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/repo-cleanup/work_plan.md | Work Plan: Repo Cleanup (remove SGal3_filters, deprecated modules, stray files; README mermaid rewrite) | open | ☐ |
+| ☐ | 12 | planning/repo-cleanup/work_plan.md | Work Plan: Repo Cleanup (remove SGal3_filters, deprecated modules, stray files; README mermaid rewrite) | open | ☐ |
 
 | details |
 |---------|
@@ -471,7 +471,7 @@
 ### planning/arp-prp-data-import-verification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
+| ☐ | 3 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
 
 | details |
 |---------|
@@ -481,7 +481,7 @@
 ### planning/arp-prp-data-import-verification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
+| ☐ | 3 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
 
 | details |
 |---------|
@@ -491,7 +491,7 @@
 ### planning/arp-prp-data-import-verification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 3 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
+| ☐ | 5 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
 
 | details |
 |---------|
@@ -500,7 +500,7 @@
 ### planning/readme-mermaid-fix/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 4 | planning/readme-mermaid-fix/work_plan.md | Task Plan: Fix mindmap parse error in root README | open | ☐ |
+| ☐ | 6 | planning/readme-mermaid-fix/work_plan.md | Task Plan: Fix mindmap parse error in root README | open | ☐ |
 
 | details |
 |---------|
@@ -510,7 +510,7 @@
 ### planning/arp-prp-data-import-verification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 3 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
+| ☐ | 5 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
 
 | details |
 |---------|
@@ -519,7 +519,7 @@
 ### planning/run-all-arp-prp-experiments/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 4 | planning/run-all-arp-prp-experiments/work_plan.md | Work Plan: Run-all ARP-PRP experiments (pilot = exp15) | open | ☐ |
+| ☐ | 6 | planning/run-all-arp-prp-experiments/work_plan.md | Work Plan: Run-all ARP-PRP experiments (pilot = exp15) | open | ☐ |
 
 | details |
 |---------|
@@ -529,7 +529,7 @@
 ### planning/arp-prp-data-import-verification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 3 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
+| ☐ | 5 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
 
 | details |
 |---------|
@@ -538,7 +538,7 @@
 ### planning/run-all-arp-prp-experiments/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 4 | planning/run-all-arp-prp-experiments/work_plan.md | Work Plan: Run-all ARP-PRP experiments (pilot = exp15) | open | ☐ |
+| ☐ | 6 | planning/run-all-arp-prp-experiments/work_plan.md | Work Plan: Run-all ARP-PRP experiments (pilot = exp15) | open | ☐ |
 
 | details |
 |---------|
@@ -548,7 +548,7 @@
 ### planning/arp-prp-data-import-verification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 3 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
+| ☐ | 5 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
 
 | details |
 |---------|
@@ -557,7 +557,7 @@
 ### planning/run-all-arp-prp-experiments/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 4 | planning/run-all-arp-prp-experiments/work_plan.md | Work Plan: Run-all ARP-PRP experiments (pilot = exp15) | open | ☐ |
+| ☐ | 6 | planning/run-all-arp-prp-experiments/work_plan.md | Work Plan: Run-all ARP-PRP experiments (pilot = exp15) | open | ☐ |
 
 | details |
 |---------|
@@ -567,7 +567,7 @@
 ### planning/arp-prp-data-import-verification/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 2 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
+| ☐ | 3 | planning/arp-prp-data-import-verification/work_plan.md | Task Plan: ARP_PRP data import verification | open | ☐ |
 
 | details |
 |---------|
@@ -578,7 +578,7 @@
 ### planning/mail-keeper-model-fix/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 5 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
+| ☐ | 9 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
 
 | details |
 |---------|
@@ -587,7 +587,7 @@
 ### planning/mail-keeper-pruning/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 6 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
+| ☐ | 10 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
 
 | details |
 |---------|
@@ -596,7 +596,7 @@
 ### planning/smoke-test-mail-isolation/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
+| ☐ | 11 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
 
 | details |
 |---------|
@@ -605,7 +605,7 @@
 ### planning/workflows-mail-keeper/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
+| ☐ | 12 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
 
 | details |
 |---------|
@@ -615,7 +615,7 @@
 ### planning/mail-keeper-model-fix/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 5 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
+| ☐ | 9 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
 
 | details |
 |---------|
@@ -624,7 +624,7 @@
 ### planning/mail-keeper-pruning/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 6 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
+| ☐ | 10 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
 
 | details |
 |---------|
@@ -633,7 +633,7 @@
 ### planning/smoke-test-mail-isolation/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
+| ☐ | 11 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
 
 | details |
 |---------|
@@ -642,7 +642,7 @@
 ### planning/workflows-mail-keeper/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
+| ☐ | 12 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
 
 | details |
 |---------|
@@ -652,7 +652,7 @@
 ### planning/mail-keeper-model-fix/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 5 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
+| ☐ | 9 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
 
 | details |
 |---------|
@@ -661,7 +661,7 @@
 ### planning/mail-keeper-pruning/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 6 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
+| ☐ | 10 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
 
 | details |
 |---------|
@@ -670,7 +670,7 @@
 ### planning/smoke-test-mail-isolation/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
+| ☐ | 11 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
 
 | details |
 |---------|
@@ -679,7 +679,7 @@
 ### planning/workflows-mail-keeper/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
+| ☐ | 12 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
 
 | details |
 |---------|
@@ -689,7 +689,7 @@
 ### planning/mail-keeper-model-fix/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 5 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
+| ☐ | 9 | planning/mail-keeper-model-fix/work_plan.md | Work Plan: mail-keeper model-ref fix + error-text logging | open | ☐ |
 
 | details |
 |---------|
@@ -698,7 +698,7 @@
 ### planning/mail-keeper-pruning/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 6 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
+| ☐ | 10 | planning/mail-keeper-pruning/work_plan.md | Task Plan: mail-keeper — runner-owned pruning of checked daily entries | open | ☐ |
 
 | details |
 |---------|
@@ -707,7 +707,7 @@
 ### planning/smoke-test-mail-isolation/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 7 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
+| ☐ | 11 | planning/smoke-test-mail-isolation/work_plan.md | Work Plan: Hermetic MAIL_* env isolation in smoke tests | open | ☐ |
 
 | details |
 |---------|
@@ -716,7 +716,7 @@
 ### planning/workflows-mail-keeper/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
+| ☐ | 12 | planning/workflows-mail-keeper/work_plan.md | Work Plan: agentic_scripts — Mail-Keeper Workflow | open | ☐ |
 
 | details |
 |---------|
