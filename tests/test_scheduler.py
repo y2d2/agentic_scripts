@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from conftest import strip_live_repo_workflows
 
 from agentic_scripts.scheduler import run
 
@@ -41,6 +42,11 @@ def _write_config(
 ) -> Path:
     """Write a tmp copy of the shipped config pointed at the given dirs and return its path.
 
+    The copy is stripped of the real-repo workflows (see
+    :func:`conftest.strip_live_repo_workflows`): these tests drive a real
+    :func:`agentic_scripts.scheduler.run`, and an enabled ``gate: idle`` entry in the
+    shipped config would otherwise clone the user's real repos and push listing commits.
+
     Args:
         tmp_path: pytest temp dir to hold the YAML file.
         state_dir/log_dir/sandbox_dir: Absolute dirs for the ``paths`` section.
@@ -51,7 +57,9 @@ def _write_config(
     Returns:
         The path of the written config file.
     """
-    data = copy.deepcopy(yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8")))
+    data = strip_live_repo_workflows(
+        copy.deepcopy(yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8")))
+    )
     data["paths"] = {
         "state_dir": str(state_dir),
         "log_dir": str(log_dir),

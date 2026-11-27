@@ -55,14 +55,21 @@ def test_shipped_config_loads(project_root: Path) -> None:
     )
     assert str(cfg.paths.state_dir).startswith(str(PROJECT_ROOT))
 
-    # Workflow order preserved from YAML: [noop, mail-keeper, oc-todo].
+    # Workflow order preserved from YAML: [noop, mail-keeper, oc-todo, roadmap-dev].
     assert [w.name for w in cfg.workflows] == [
         "noop",
         "mail-keeper",
         "oc-todo",
+        "roadmap-dev",
     ]
     # noop has no agent.
     assert cfg.workflows[0].agent is None
+    # roadmap-dev is registered for the session-based idle gate and spawns planner-enhanced
+    # (the module is import-checked by load_config because the entry is enabled).
+    roadmap_dev = cfg.workflows[-1]
+    assert roadmap_dev.gate == "idle"
+    assert roadmap_dev.agent == "planner-enhanced"
+    assert roadmap_dev.module == "agentic_scripts.workflows.roadmap_dev"
 
 
 def test_missing_machine_section(tmp_path: Path) -> None:
