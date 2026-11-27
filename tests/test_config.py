@@ -233,6 +233,243 @@ def test_shipped_config_without_oc_todo_still_loads(project_root: Path) -> None:
     assert cfg.oc_todo.repos == []
 
 
+# --- roadmap_prompts section ---------------------------------------------------
+
+
+def test_roadmap_prompts_absent_defaults(tmp_path: Path) -> None:
+    """A config without a ``roadmap_prompts`` section loads empty defaults (no-op)."""
+    data = _base(tmp_path)
+    data.pop("roadmap_prompts", None)
+    cfg = load_config(_write(tmp_path, data))
+    assert cfg.roadmap_prompts.allowed_repos == []
+    assert cfg.roadmap_prompts.listing_repo == ""
+    assert cfg.roadmap_prompts.listing_repo_url == ""
+    assert cfg.roadmap_prompts.listing_path == ""
+    assert cfg.roadmap_prompts.listing_branch == ""
+    assert cfg.roadmap_prompts.run_timeout_minutes == 480
+    assert cfg.roadmap_prompts.test_commands == {}
+    assert cfg.roadmap_prompts.repo_urls == {}
+    # No section at all → no listing surface → the local mirror is disabled too.
+    assert cfg.roadmap_prompts.local_listing is None
+
+
+def test_roadmap_prompts_shipped_loads(project_root: Path) -> None:
+    """The shipped config loads with the roadmap-dev entry and the roadmap_prompts section.
+
+    The entry ships enabled with ``gate: idle``; the shipped ``allowed_repos`` are the
+    nine operator repos and the listing (plus its local mirror) is this repo's
+    ``plans.md``.
+    """
+    cfg = load_config(project_root / "config" / "workflows.yaml")
+
+    entry = next(w for w in cfg.workflows if w.name == "roadmap-dev")
+    assert entry.enabled is True
+    assert entry.gate == "idle"
+    assert entry.agent == "planner-enhanced"
+
+    assert cfg.roadmap_prompts.allowed_repos == [
+        "y2d2/ARP_MPE",
+        "y2d2/ARP_implementations",
+        "y2d2/ARP_1A_anchored_implementations",
+        "y2d2/ARP_utility_code",
+        "y2d2/PRP_ARP_M",
+        "y2d2/ARP_IMU",
+        "y2d2/agentic_scripts",
+        "y2d2/ARP_roadmap",
+        "y2d2/ARP_engine",
+    ]
+    assert cfg.roadmap_prompts.listing_repo == "y2d2/agentic_scripts"
+    assert cfg.roadmap_prompts.listing_repo_url == ""
+    assert cfg.roadmap_prompts.listing_path == "plans.md"
+    assert cfg.roadmap_prompts.listing_branch == "main"
+    assert cfg.roadmap_prompts.run_timeout_minutes == 480
+    assert cfg.roadmap_prompts.test_commands == {}
+    assert cfg.roadmap_prompts.repo_urls == {}
+    assert cfg.roadmap_prompts.local_listing == "plans.md"
+
+
+def test_roadmap_prompts_valid_section_roundtrip(tmp_path: Path) -> None:
+    """A valid ``roadmap_prompts`` section parses to the exact expected values."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": ["owner/one", "owner/two"],
+        "listing_repo": "owner/listing",
+        "listing_repo_url": "/tmp/local-listing.git",
+        "listing_path": "plans.md",
+        "listing_branch": "dev",
+        "run_timeout_minutes": 120,
+        "test_commands": {"owner/one": "uv run pytest"},
+        "repo_urls": {"owner/two": "/tmp/local.git"},
+    }
+    cfg = load_config(_write(tmp_path, data))
+    assert cfg.roadmap_prompts.allowed_repos == ["owner/one", "owner/two"]
+    assert cfg.roadmap_prompts.listing_repo == "owner/listing"
+    assert cfg.roadmap_prompts.listing_repo_url == "/tmp/local-listing.git"
+    assert cfg.roadmap_prompts.listing_path == "plans.md"
+    assert cfg.roadmap_prompts.listing_branch == "dev"
+    assert cfg.roadmap_prompts.run_timeout_minutes == 120
+    assert cfg.roadmap_prompts.test_commands == {"owner/one": "uv run pytest"}
+    assert cfg.roadmap_prompts.repo_urls == {"owner/two": "/tmp/local.git"}
+    # local_listing omitted → the documented default.
+    assert cfg.roadmap_prompts.local_listing == "plans.md"
+
+
+def test_roadmap_prompts_local_listing_explicit_string(tmp_path: Path) -> None:
+    """An explicit ``local_listing`` string parses through verbatim (relative or absolute)."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": [],
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+        "local_listing": "docs/listing.md",
+    }
+    cfg = load_config(_write(tmp_path, data))
+    assert cfg.roadmap_prompts.local_listing == "docs/listing.md"
+
+
+def test_roadmap_prompts_local_listing_null(tmp_path: Path) -> None:
+    """``local_listing: null`` loads as ``None`` (mirror disabled, section present)."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": [],
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+        "local_listing": None,
+    }
+    cfg = load_config(_write(tmp_path, data))
+    assert cfg.roadmap_prompts.local_listing is None
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 42])
+def test_roadmap_prompts_local_listing_bad(tmp_path: Path, bad: object) -> None:
+    """An empty/blank/non-string ``local_listing`` names roadmap_prompts.local_listing."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": [],
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+        "local_listing": bad,
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.local_listing" in str(exc.value)
+
+
+def test_roadmap_prompts_allowed_repos_not_a_list(tmp_path: Path) -> None:
+    """A non-list ``allowed_repos`` names roadmap_prompts.allowed_repos."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": "owner/one",
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.allowed_repos" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", ["no-slash", "a/b/c", ""])
+def test_roadmap_prompts_bad_allowed_repo(tmp_path: Path, bad: str) -> None:
+    """A malformed allowed repo id names roadmap_prompts.allowed_repos[0]."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": [bad],
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.allowed_repos[0]" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", ["no-slash", "a/b/c", 42])
+def test_roadmap_prompts_bad_listing_repo(tmp_path: Path, bad: object) -> None:
+    """A malformed listing_repo names roadmap_prompts.listing_repo."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": [],
+        "listing_repo": bad,
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.listing_repo" in str(exc.value)
+
+
+def test_roadmap_prompts_missing_required_key(tmp_path: Path) -> None:
+    """A missing required key (listing_path) names roadmap_prompts.listing_path."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": [],
+        "listing_repo": "owner/listing",
+        "listing_branch": "main",
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.listing_path" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", [0, -5, "long"])
+def test_roadmap_prompts_bad_run_timeout(tmp_path: Path, bad: object) -> None:
+    """An out-of-range or non-int run_timeout_minutes names the dotted field."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": [],
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+        "run_timeout_minutes": bad,
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.run_timeout_minutes" in str(exc.value)
+
+
+def test_roadmap_prompts_test_commands_key_not_in_allowed_repos(tmp_path: Path) -> None:
+    """A test_commands key absent from allowed_repos names the dotted repo key."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": ["owner/one"],
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+        "test_commands": {"other/repo": "uv run pytest"},
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.test_commands.other/repo" in str(exc.value)
+
+
+def test_roadmap_prompts_repo_urls_key_not_in_allowed_repos(tmp_path: Path) -> None:
+    """A repo_urls key absent from allowed_repos names the dotted repo key."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = {
+        "allowed_repos": ["owner/one"],
+        "listing_repo": "owner/listing",
+        "listing_path": "plans.md",
+        "listing_branch": "main",
+        "repo_urls": {"other/repo": "/tmp/local.git"},
+    }
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts.repo_urls.other/repo" in str(exc.value)
+
+
+def test_roadmap_prompts_not_a_mapping(tmp_path: Path) -> None:
+    """A ``roadmap_prompts`` section that is not a mapping names roadmap_prompts."""
+    data = _base(tmp_path)
+    data["roadmap_prompts"] = ["owner/one"]
+    with pytest.raises(ConfigError) as exc:
+        load_config(_write(tmp_path, data))
+    assert "roadmap_prompts" in str(exc.value)
+
+
 # --- workflows.<name>.gate -----------------------------------------------------
 
 

@@ -84,6 +84,27 @@ def strip_live_repo_workflows(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+@pytest.fixture(autouse=True)
+def _redirect_roadmap_mirror_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pin the roadmap-dev local-listing mirror's project-root basis to ``tmp_path``.
+
+    Purpose:
+        ``roadmap_prompts.local_listing`` defaults to ``"plans.md"``, and
+        :meth:`agentic_scripts.workflows.roadmap_dev._mirror_listing` resolves a relative
+        value against the module-level ``PROJECT_ROOT`` — i.e. the REAL repo root. Any
+        test that happens to drive a roadmap reconcile (shipped-config copy, fixture
+        repos) would otherwise write ``plans.md`` into the working tree. This guard
+        redirects the basis to the per-test temp dir so no test can ever touch the real
+        tree; tests that WANT to assert on the mirror location patch the same name
+        themselves (test-local patch wins — same monkeypatch instance, LIFO undo).
+
+    Args:
+        monkeypatch: The function-scoped patcher (undo restores the real basis).
+        tmp_path: The per-test temporary directory used as the stand-in root.
+    """
+    monkeypatch.setattr("agentic_scripts.workflows.roadmap_dev.PROJECT_ROOT", tmp_path)
+
+
 @pytest.fixture
 def project_root() -> Path:
     """Return the repository root, computed from this conftest's location.
