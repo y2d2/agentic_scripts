@@ -31,8 +31,10 @@ Rationale:
     branch of an allowed repo. Its identity is repo + branch + folder path + sha256 of the
     folder's files **excluding** ``questions.md`` and ``failure.md`` (workflow-written
     diagnostics must not change identity); any user edit of any other plan file yields a
-    new identity and a new listing row. The live listing (``ARP_prompts/plans.md``) is a
-    per-repo ``#`` / per-branch ``##`` table with exactly the columns
+    new identity and a new listing row. The live listing is ``plans.md`` on
+    ``y2d2/agentic_scripts`` main (the canonical surface — a local mirror of it is written
+    to ``<project root>/plans.md``, so edits made there take effect only once pushed); it
+    is a per-repo ``#`` / per-branch ``##`` table with exactly the columns
     :data:`LISTING_COLUMNS`; the reconciler owns the ``title`` and ``state`` cells and
     preserves the user-owned ``approval`` / ``priority`` / ``remove`` cells (the one
     sanctioned state-cell edit is re-arming a ``failure`` row to ``open``). Each plan
@@ -84,7 +86,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agentic_scripts.agent import AgentResult
-from agentic_scripts.config import Config, RoadmapPrompts
+from agentic_scripts.config import PROJECT_ROOT, Config, RoadmapPrompts
 from agentic_scripts.git import Git, GitError
 from agentic_scripts.workflows.base import WorkflowResult
 
@@ -2069,7 +2071,9 @@ class RoadmapDevWorkflow:
             base), re-write + commit + push. A second failure records ``listing push
             failed for <repo>: …`` in the errors (the state document is still returned
             for persistence — the next fire retries, and reconcile is idempotent so
-            re-applying is safe).
+            re-applying is safe). After every decision — pushed, no-op, or failed — the
+            final rendered text is best-effort mirrored to the local ``local_listing``
+            file (see :meth:`_mirror_listing`).
 
         Args:
             ctx: The shared context (``run_id`` in the commit message, logger).
@@ -2092,7 +2096,9 @@ class RoadmapDevWorkflow:
 
         Side Effects:
             At most two listing commits (first attempt + retry), at most two pushes, one
-            fetch per retry; the listing file is rewritten before each commit.
+            fetch per retry; the listing file is rewritten before each commit; the final
+            rendered text is also written to the local mirror file when configured and
+            stale (best-effort, never an error — :meth:`_mirror_listing`).
 
         Raises:
             GitError: Never from this method — commit/push faults are caught (the retry
@@ -2116,8 +2122,10 @@ class RoadmapDevWorkflow:
         )
         actions.extend(logs)
 
-        if render_listing(new_rows) == current_md:
+        rendered = render_listing(new_rows)
+        if rendered == current_md:
             actions.append(f"listing unchanged ({len(new_rows)} row(s)) — no push")
+            self._mirror_listing(ctx, rendered, actions)
             return new_state, actions, errors
 
         def commit_and_push(md: str) -> bool:
@@ -2159,7 +2167,7 @@ class RoadmapDevWorkflow:
                 pass  # local branch or origin/<branch> absent — the checkout below
             if branch != self._git.current_branch(prompts_clone):
                 self._git.checkout(prompts_clone, branch, ref=f"origin/{branch}")
-            pushed = commit_and_push(render_listing(new_rows))
+            pushed = commit_and_push(rendered)
         except GitError as exc:
             # ONE retry: fetch, re-point, re-read the remote listing, re-reconcile.
             ctx.logger.warning(
@@ -2203,7 +2211,57 @@ class RoadmapDevWorkflow:
                 )
             else:
                 actions.append(f"listing unchanged ({len(new_rows)} row(s)) — no push")
+        self._mirror_listing(ctx, render_listing(new_rows), actions)
         return new_state, actions, errors
+
+    def _mirror_listing(self, ctx, rendered: str, actions: list[str]) -> None:
+        """Mirror the rendered listing into the local working tree (best-effort).
+
+        Purpose:
+            Show the user the live listing as a file inside *this* repo: when
+            ``roadmap_prompts.local_listing`` is set and the file's current content
+            differs from ``rendered`` (including a missing file), rewrite it with
+            exactly the rendered text. Called from :meth:`_reconcile_and_push` after
+            every decision — including the remote-push no-op — so a stale or deleted
+            mirror self-heals on the next pass while the remote listing is unchanged.
+            The mirror is workflow→user only: edits made in it take effect once
+            committed and pushed to the listing repo (:meth:`_fetch_listing` reads
+            the remote, never the mirror).
+
+        Args:
+            ctx: The shared context (for logging).
+            rendered: The final rendered listing text (byte-identical to what the
+                push path writes at ``listing_path``).
+            actions: The caller's action-note list (appended with
+                ``listing mirrored to <path>`` when a write happens).
+
+        Side Effects:
+            Writes one file under :data:`PROJECT_ROOT` (a relative ``local_listing``
+            resolves against the same project-root basis as ``paths.*``; an absolute
+            value passes through) and creates its parent dirs if missing. Never runs
+            git on the working tree.
+
+        Raises:
+            Exception: Never — any failure (permission, disk, …) is logged as
+                ``listing mirror write failed: …`` and swallowed; the mirror must not
+                touch the run's error count nor abort the workflow.
+        """
+        local = self._settings.local_listing
+        if local is None:
+            return
+        target = Path(local)
+        if not target.is_absolute():
+            target = PROJECT_ROOT / target
+        try:
+            current = target.read_text(encoding="utf-8") if target.exists() else None
+            if current == rendered:
+                return
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(rendered, encoding="utf-8")
+            actions.append(f"listing mirrored to {target}")
+            ctx.logger.info("roadmap-dev: listing mirrored to %s", target)
+        except Exception as exc:  # noqa: BLE001 - the mirror must never affect the run
+            ctx.logger.error("listing mirror write failed: %s", exc)
 
     def _reap_orphans(self, ctx, st: dict) -> tuple[dict, list[str]]:
         """Reap orphaned ``pending`` plans at run start (state flip + worktree cleanup).

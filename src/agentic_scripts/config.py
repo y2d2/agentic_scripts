@@ -257,6 +257,11 @@ class RoadmapPrompts:
         repo_urls: Optional clone-URL override per repo (a local path or a URL; the
             hermetic-test/mirror seam). Keys must be members of :attr:`allowed_repos`;
             values are non-empty strings. Empty when no overrides are configured.
+        local_listing: Path of the local working-tree mirror of the listing (the workflow
+            writes the rendered listing there after every reconcile). Relative values
+            resolve against the same project-root basis as ``paths.*``
+            (:data:`PROJECT_ROOT`); absolute values pass through. ``None`` disables the
+            local mirror. Defaults to ``"plans.md"``.
 
     Note:
         An empty ``allowed_repos`` list means the workflow no-ops: there is nothing to
@@ -271,6 +276,7 @@ class RoadmapPrompts:
     run_timeout_minutes: int
     test_commands: dict[str, str]
     repo_urls: dict[str, str]
+    local_listing: str | None = "plans.md"
 
 
 _EMPTY_ROADMAP_PROMPTS = RoadmapPrompts(
@@ -282,6 +288,7 @@ _EMPTY_ROADMAP_PROMPTS = RoadmapPrompts(
     run_timeout_minutes=DEFAULT_RUN_TIMEOUT_MINUTES,
     test_commands={},
     repo_urls={},
+    local_listing=None,  # no section at all → no listing surface → mirror disabled
 )
 
 
@@ -697,6 +704,14 @@ def _load_roadmap_prompts(data: dict[str, Any]) -> RoadmapPrompts:
     if not isinstance(listing_branch, str) or not listing_branch.strip():
         raise ConfigError(f"{section}.listing_branch", "must be a non-empty string")
 
+    # local_listing: optional; default "plans.md"; a non-empty string (project-root
+    # relative local mirror of the listing) or null (mirror disabled).
+    local_listing = data.get("local_listing", "plans.md")
+    if local_listing is not None and (
+        not isinstance(local_listing, str) or not local_listing.strip()
+    ):
+        raise ConfigError(f"{section}.local_listing", "must be a non-empty string or null")
+
     # run_timeout_minutes: optional; default DEFAULT_RUN_TIMEOUT_MINUTES; int >= 1.
     run_timeout = data.get("run_timeout_minutes", DEFAULT_RUN_TIMEOUT_MINUTES)
     if not isinstance(run_timeout, int) or isinstance(run_timeout, bool):
@@ -732,6 +747,7 @@ def _load_roadmap_prompts(data: dict[str, Any]) -> RoadmapPrompts:
         run_timeout_minutes=run_timeout,
         test_commands=test_commands,
         repo_urls=repo_urls,
+        local_listing=local_listing,
     )
 
 
