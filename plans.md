@@ -181,15 +181,6 @@
 |---------|
 | **Goal:** Produce a 30-min ORBIT presentation for the ROB kick-off Advisory Board (25 Nov 2026, Ghent), starting with a storyboard draft.<br>**Tasks:**<br>1 Storyboard (markdown)<br>2 Integrate user edits into storyboard<br>3 Build draft .pptx<br>4 Picture-led storyboard v2<br>5 Picture-led draft .pptx<br>6 Image-generator prompts<br>7 TikZ illustration kit + text-free teaser + pilots P02/P09/P16 |
 
-### planning/orbit-rob-kickoff-workshop-notes/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 252 | planning/orbit-rob-kickoff-workshop-notes/work_plan.md | Work plan — ORBIT ROB kick-off workshop notes (Autonomous Navigation, group 2) | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** Turn the 5 board photos + note-taker notes from the 25/11 ROB kick-off "Autonomous Navigation" table (deSter, Pfizer, DroneDivision, RBD Robotics, coera) into a Markdown summary mirroring `workshop orbit en fidex.docx` (spoken summary + board transcription per company), then commit/push the agreed scope.<br>**Tasks:**<br>1 workshop md and commit |
-
 ### planning/unitree-vault-note/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
@@ -198,6 +189,15 @@
 | details |
 |---------|
 | **Goal:** Persist a short, clean note in the ORBIT vault documenting the Unitree G1/Go2 configuration FARI put in the tender (PROC 1), with mail provenance tags.<br>**Tasks:**<br>1 Create the vault note<br>2 Commit + push the note (depends on #1) |
+
+### planning/orbit-rob-kickoff-workshop-notes/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 254 | planning/orbit-rob-kickoff-workshop-notes/work_plan.md | Work plan — ORBIT ROB kick-off workshop notes (Autonomous Navigation, group 2) | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Turn the 5 board photos + note-taker notes from the 25/11 ROB kick-off "Autonomous Navigation" table (deSter, Pfizer, DroneDivision, RBD Robotics, coera) into a Markdown summary mirroring `workshop orbit en fidex.docx` (spoken summary + board transcription per company), then commit/push the agreed scope.<br>**Tasks:**<br>1 workshop md and commit |
 
 ## main
 ### planning/esa-bt-gate0-slide/work_plan.md
@@ -386,6 +386,88 @@
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
 | ☐ | 138 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Persist a short, clean note in the ORBIT vault documenting the Unitree G1/Go2 configuration FARI put in the tender (PROC 1), with mail provenance tags.<br>**Tasks:**<br>1 Create the vault note<br>2 Commit + push the note (depends on #1) |
+
+## feature/submodule-migration
+### planning/esa-bt-gate0-slide/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 1 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** —<br>**Tasks:**<br>1 fill bt slide |
+
+### planning/esa-no-open-source/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 2 | planning/esa-no-open-source/work_plan.md | Work plan — ESA OSIP: drop open-source commitment | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** —<br>**Tasks:**<br>1 remove open source |
+
+### planning/orbit-demo1-visual/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 3 | planning/orbit-demo1-visual/work_plan.md | Work plan — ORBIT Demonstrator 1, Scenario B visual | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** —<br>**Tasks:**<br>1 TikZ schematic of 2027 Scenario B, render PDF + PNG, visual check<br>2 teaser illustration, robot B = Unitree G1 humanoid |
+
+### planning/orbit-dmp-unification/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 4 | planning/orbit-dmp-unification/work_plan.md | Work Plan: Unify ORBIT DMP Questionnaire Answers | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Merge the 5 partner responses in `projects/ORBIT/DMP Questionnaire ORBIT.xlsx` (Google Forms export) into a single, unified Markdown document that keeps per-research-group specifics and tracks every dataset.<br>**Tasks:**<br>1 Create the unified DMP Markdown document |
+
+### planning/orbit-dmp/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 5 | planning/orbit-dmp/work_plan.md | Task Plan: ORBIT DMP v0 — consortium data management plan | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first consortium DMP, in five sequential sub-agent tasks.<br>**Tasks:**<br>1 Skeleton & front matter (no dependencies)<br>2 Master table 1 (depends on #1)<br>3 Supporting tables 2–6 (depends on #2)<br>4 Minimal prose + Coera/IP text (depends on #3)<br>5 QA pass (depends on #4)<br>6 Coera removal + ethics commission (depends on #5; user-directed change 2026-11-10)<br>7 brubotics-hamed label → VUB-IMS-confidential (depends on #6; user-directed change 2026-11-10)<br>8 add IDLab-IWIN to consortium list (depends on #7; user-directed change 2026-11-10)<br>9 IDLab-IWIN → IDLab-IWINE (depends on #8; verified externally 2026-11-16)<br>10 Table 1 — drop Label & Storage & backup columns (depends on #9; user-directed 2026-11-16)<br>11 EM entries → EM-IWINE (depends on #10; user-directed 2026-11-16)<br>12 Dataset IDs in Table 1, cross-referenced in Tables 2–6 (depends on #11; user-approved 2026-11-16)<br>13 §6 — drop IPTA sentence, use dataset IDs (depends on #12; user-directed 2026-11-16)<br>14 Remove Miluv dataset, keep new robot localisation dataset B2 (depends on #13; user-directed 2026-11-16)<br>15 Data IDs as first column in Tables 2–6 (depends on #14; user-directed 2026-11-16)<br>16 Renumber B IDs, unify table inputs, full ID coverage (depends on #15; user-directed 2026-11-18)<br>17 Funding scheme imec PROSPECT (depends on #16; user-confirmed 2026-11-18)<br>18 Remove section 6 (depends on #17; user-directed 2026-11-18)<br>19 Plain "Reused" in Table 1 (depends on #18; user-directed 2026-11-18)<br>20 Move C5 to A8, renumber C6 → C5 (depends on #19; user-directed 2026-11-18) |
+
+### planning/orbit-email-lists-per-wp/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 6 | planning/orbit-email-lists-per-wp/work_plan.md | Work plan — ORBIT e-mail lists per WP | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Move the per-WP copy-paste e-mail lines in `projects/ORBIT/ORBIT_people_per_WP.md` from the separate "## E-mail lists" section into each WP section; keep one "All" line.<br>**Tasks:**<br>1 relocate e-mail lists |
+
+### planning/orbit-people-update/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 7 | planning/orbit-people-update/work_plan.md | Work Plan: ORBIT people per WP — Oct 2026 refresh | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** Update `projects/ORBIT/ORBIT_people_per_WP.md` with staffing changes since 13 Oct 2026.<br>**Tasks:**<br>1 Rewrite file + commit |
+
+### planning/orbit-plenary-i-slides/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 8 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** —<br>**Tasks:**<br>9 outcomes report<br>10 cleaned deck |
+
+### planning/unitree-vault-note/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 9 | planning/unitree-vault-note/work_plan.md | Task Plan: Unitree FARI acquisition vault note | open | ☐ |
 
 | details |
 |---------|
