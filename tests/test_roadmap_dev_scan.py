@@ -58,12 +58,14 @@ PLAN_ORBIT = "### planning/orbit-sim/work_plan.md"
 ROW_UNITEST = "| ☐ | 1 | planning/unitest/work_plan.md | Unit tests | open | ☐ |"
 ROW_ORBIT = "| ☐ | 1 | planning/orbit-sim/work_plan.md | ORBIT sim extension | open | ☐ |"
 ROW_NETFIT = "| ☐ | 1 | planning/netfit/work_plan.md | Netfit | open | ☐ |"
-# The workflow-owned per-plan sections (Task 1): unitest has NEITHER goal nor tasks →
-# NO details table; orbit-sim carries work_plan_task_1_x.md (tier 3 → task "1 x") and
-# neither fixture plan has a Purpose/Goal marker (no-goal sentinel → ``**Goal:** —``).
-DETAILS_HEADER = "| details |"
-DETAILS_SEP = "|---------|"
-DETAILS_ORBIT = "| **Goal:** —<br>**Tasks:**<br>1 x |"
+# The workflow-owned per-plan sections: unitest has NEITHER goal nor tasks → NO
+# details checklist; orbit-sim carries work_plan_task_1_x.md (tier 3 → the triple
+# ("1", "x", False) — no lightweight-dev report in the folder) and neither fixture
+# plan has a Purpose/Goal marker (no-goal sentinel → the G row renders the em-dash,
+# ☐ while the row state is open).
+DETAILS_HEADER = "| # | details | ✓ |"
+DETAILS_SEP = "|---|---------|---|"
+DETAILS_ORBIT = "| G | — | ☐ |\n| 1 | x | ☐ |"
 # NOTE: no trailing newline — :meth:`Git.show_file` (used by ``_remote_listing``) rstrips
 # the file's trailing newline(s); the file on the remote carries exactly one (the renderer
 # emits one).

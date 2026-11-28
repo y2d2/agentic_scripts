@@ -24,6 +24,8 @@ from agentic_scripts.config import Config, RoadmapPrompts, load_config
 from agentic_scripts.state import StateStore
 from agentic_scripts.workflows.base import WorkContext
 from agentic_scripts.workflows.roadmap_dev import (
+    _DETAILS_HEADER,
+    _DETAILS_SEPARATOR,
     ARCHIVED_SEGMENT,
     DIAGNOSTIC_FILES,
     LISTING_COLUMNS,
@@ -134,13 +136,14 @@ def _plan(
     branch: str = "main",
     content_hash: str = "c" * 64,
     goal: str = "",
-    task_titles: tuple[tuple[str, str], ...] = (),
+    task_titles: tuple[tuple[str, str, bool], ...] = (),
 ) -> Plan:
     """Build a :class:`Plan` test fixture with a stable (non-colliding) identity.
 
     ``goal`` / ``task_titles`` default to empty (the parsed-row shape) so the listing
     renders byte-stably across the steady-state tests; pass them to exercise the
-    details-table stamping.
+    details-checklist stamping (``task_titles`` entries are ``(label, title, done)``
+    triples; ``done`` drives the ☑/☐ mark of the task's checklist row).
     """
     return Plan(
         repo=repo,
@@ -520,7 +523,8 @@ def test_discover_plans_filters_sorts_and_stamps() -> None:
 
 
 def test_discover_plans_stamps_goal_and_tasks() -> None:
-    """discover_plans stamps each Plan with extract_goal + extract_task_titles."""
+    """discover_plans stamps (label, title, done) triples; without report files no task
+    is done."""
     wp = (
         "# Orbit DMP v0\n"
         "\n"
@@ -548,10 +552,49 @@ def test_discover_plans_stamps_goal_and_tasks() -> None:
     assert plan.goal == (
         "Build `projects/ORBIT/DMP/ORBIT_DMP_v0.md`, the table-first consortium DMP."
     )
-    # Tier-1 headings win over the tier-3 task files in file_contents.
-    assert plan.task_titles == (("1", "Skeleton & front matter"), ("2", "Master table 1"))
+    # Tier-1 headings win over the tier-3 task files in file_contents; the folder
+    # carries no lightweight-dev result reports, so every task stays done=False.
+    assert plan.task_titles == (
+        ("1", "Skeleton & front matter", False),
+        ("2", "Master table 1", False),
+    )
     # Identity is unchanged by the new fields (repo/branch/path/hash only).
     assert plan.identity == plan_identity("o/r", "main", plan.path, plan.content_hash)
+
+
+def test_discover_plans_stamps_task_done_flags_from_reports() -> None:
+    """The done flag comes from report files: underscore + hyphen spellings, letter
+    labels and folder-relative report paths all count; unreported tasks stay False."""
+    wp = (
+        "# Reports\n"
+        "\n"
+        "### Task 1: Scaffold\n"
+        "\n"
+        "### Task 2: Runner\n"
+        "\n"
+        "### Task 3: Wrap\n"
+        "\n"
+        "### Task 3b: Sub\n"
+    )
+    entry = PlanEntry(
+        dir="planning/reports",
+        work_plan_text=wp,
+        file_contents={
+            "work_plan.md": wp.encode("utf-8"),
+            "lightweight_dev_task_2_runner.md": b"# Report 2\n",
+            "sub/lightweight-dev_task_3b_fix.md": b"# Report 3b\n",
+        },
+    )
+    plans = discover_plans("o/r", "main", [entry])
+    assert len(plans) == 1
+    # Task 2 has its report (underscore spelling); 3b has the hyphen-spelled report at
+    # a folder-relative path; 1 and 3 carry no report → done=False.
+    assert plans[0].task_titles == (
+        ("1", "Scaffold", False),
+        ("2", "Runner", True),
+        ("3", "Wrap", False),
+        ("3b", "Sub", True),
+    )
 
 
 def test_repo_slug_and_layout_paths(tmp_path: Path) -> None:
@@ -765,15 +808,16 @@ def test_render_listing_empty_stable_and_ordered() -> None:
 
 
 def test_parse_listing_skips_per_plan_sections() -> None:
-    """Rendered per-plan sections (heading + own table + details table) parse to EXACTLY
-    the data rows.
+    """Rendered per-plan sections (heading + own table + details checklist) parse to
+    EXACTLY the data rows.
 
     Adversarial details text — pipes in goal/tasks, the ☑ glyph, the words 'approval'
     and 'open', digits, and the literal word 'details' in the details cell — still
-    yields zero extra rows: the ``###`` heading is not a ``|``-row and every
-    details-table line is one cell (escaped pipes may split the content line, never
-    into the six cells of a data row). OLD-format detail rows appended below keep being
-    skipped too (their em-dash priority cell fails ``int()``).
+    yields zero extra rows: the ``###`` heading is not a ``|``-row and every checklist
+    line is three cells, never the six of a data row (escaped pipes may split a line
+    into more cells, still not six, and stray fragments fail the priority ``int()``
+    gate too). The PREVIOUS renderers' detail lines appended below keep being skipped
+    too (cell count / em-dash priority ``int()`` failure).
     """
     rows = [
         ListingRow(
@@ -786,7 +830,7 @@ def test_parse_listing_skips_per_plan_sections() -> None:
             "open",
             False,
             goal="Has | pipes ☑ approval open words 12345",
-            task_titles=(("1", "Pipe | task ☑ approval open"),),
+            task_titles=(("1", "Pipe | task ☑ approval open", True),),
         ),
         ListingRow(
             "https://github.com/o/r.git",
@@ -797,8 +841,8 @@ def test_parse_listing_skips_per_plan_sections() -> None:
             "B",
             "review",
             False,
-            goal="—",  # the no-goal sentinel → renders **Goal:** —
-            task_titles=(("1", "42 digits 3b"), ("2", "the word details | itself")),
+            goal="—",  # the no-goal sentinel → renders the em-dash goal cell
+            task_titles=(("1", "42 digits 3b", False), ("2", "the word details | itself", True)),
         ),
         ListingRow(
             "https://github.com/o/r.git",
@@ -809,13 +853,18 @@ def test_parse_listing_skips_per_plan_sections() -> None:
             "C",
             "success",
             True,
-        ),  # defaults (no goal, no tasks) → NO details table at all
+        ),  # defaults (no goal, no tasks) → NO details checklist at all
     ]
     md = render_listing(rows)
-    # A live listing may still carry the PREVIOUS format's detail rows (the renderer
-    # dropped them; the parser must keep skipping them): the 7-cell one fails the cell
-    # count, the 6-cell one the em-dash priority's int().
+    # A live listing may still carry the PREVIOUS renderers' detail lines (the renderer
+    # dropped them; the parser must keep skipping them): the old one-cell details table
+    # (header, separator and its single body line) fails the cell count; of the older
+    # six-cell em-dash detail lines the 7-cell one fails the cell count and the 6-cell
+    # one the em-dash priority's int().
     md += (
+        "| details |\n"
+        "|---------|\n"
+        "| **Goal:** old layout<br>**Tasks:**<br>7 old task |\n"
         "| — | — | **Goal:** legacy | pipes ☑ approval open 12345 | **Tasks:** — | — | — |\n"
         "| — | — | **Goal:** — | **Tasks:** — | — | — |\n"
     )
@@ -827,17 +876,18 @@ def test_parse_listing_skips_per_plan_sections() -> None:
         "planning/c/work_plan.md",
     ]
     assert [r.priority for r in parsed] == [1, 2, 3]
-    # Parsed rows carry no goal/tasks (details tables never parse as rows).
+    # Parsed rows carry no goal/tasks (details checklists never parse as rows).
     assert all(r.goal == "" and r.task_titles == () for r in parsed)
     # The user cells of the adversarial goal/tasks never leak into the parsed rows.
     assert [r.title for r in parsed] == ["A", "B", "C"]
-    # Row c really renders NO details table; rows a and b do.
-    assert md.count("| details |") == 2
+    # Row c really renders NO details checklist; rows a and b do.
+    assert md.count(_DETAILS_HEADER) == 2
 
 
 def test_render_listing_emits_per_plan_sections() -> None:
-    """render_listing: exact per-plan-section bytes (details present, details skipped
-    when goal AND tasks are empty, one-sided parts, escaped pipes)."""
+    """render_listing: exact per-plan-section bytes (3-col details checklist present,
+    checklist skipped when goal AND tasks are empty, goal-less em-dash row, escaped
+    pipes, ☑/☐ task marks from the done flag)."""
     with_goal_tasks = ListingRow(
         "https://github.com/o/r.git",
         "main",
@@ -848,7 +898,7 @@ def test_render_listing_emits_per_plan_sections() -> None:
         "open",
         False,
         goal="Build the DMP, table-first.",
-        task_titles=(("1", "Skeleton & front matter"), ("2", "Master table 1")),
+        task_titles=(("1", "Skeleton & front matter", True), ("2", "Master table 1", False)),
     )
     default = ListingRow(
         "https://github.com/o/r.git",
@@ -869,18 +919,21 @@ def test_render_listing_emits_per_plan_sections() -> None:
         "|----------|----------|------|-------|-------|--------|\n"
         "| ☐ | 1 | planning/orbit-dmp/work_plan.md | ORBIT DMP v0 | open | ☐ |\n"
         "\n"
-        "| details |\n"
-        "|---------|\n"
-        "| **Goal:** Build the DMP, table-first.<br>**Tasks:**<br>"
-        "1 Skeleton & front matter<br>2 Master table 1 |\n"
+        "| # | details | ✓ |\n"
+        "|---|---------|---|\n"
+        "| G | Build the DMP, table-first. | ☐ |\n"
+        "| 1 | Skeleton & front matter | ☑ |\n"
+        "| 2 | Master table 1 | ☐ |\n"
         "\n"
         "### planning/unitest/work_plan.md\n"
         "| approval | priority | plan | title | state | remove |\n"
         "|----------|----------|------|-------|-------|--------|\n"
         "| ☑ | 2 | planning/unitest/work_plan.md | Unit tests | review | ☐ |\n"
     )
-    # Goal only → '<br>**Tasks:** —' directly after the goal part; tasks only (empty
-    # goal) → '**Goal:** —'.
+    # Exactly ONE checklist in the file (the goal-less/task-less default plan adds none).
+    assert md.count(_DETAILS_HEADER) == 1
+    # Goal only → a goal row alone (no task rows); tasks only (absent goal) → an
+    # em-dash goal row before the task rows.
     goal_only = ListingRow(
         "https://github.com/o/r.git",
         "main",
@@ -901,11 +954,23 @@ def test_render_listing_emits_per_plan_sections() -> None:
         "T",
         "open",
         False,
-        task_titles=(("3b", "Sub"),),
+        task_titles=(("3b", "Sub", False),),
+    )
+    goal_block = "\n" + _DETAILS_HEADER + "\n" + _DETAILS_SEPARATOR + "\n| G | G only | ☐ |\n"
+    tasks_block = (
+        "\n"
+        + _DETAILS_HEADER
+        + "\n"
+        + _DETAILS_SEPARATOR
+        + "\n| G | — | ☐ |\n| 3b | Sub | ☐ |\n"
     )
     md_side = render_listing([goal_only, tasks_only])
-    assert "| **Goal:** G only<br>**Tasks:** — |" in md_side
-    assert "| **Goal:** —<br>**Tasks:**<br>3b Sub |" in md_side
+    assert goal_block in md_side
+    assert tasks_block in md_side
+    # The goal-only checklist ends right after the G row (the section's blank line
+    # follows directly — no task rows were emitted for it).
+    after = md_side.index(goal_block) + len(goal_block)
+    assert md_side[after : after + 1] == "\n"
     # Pipes in goal/task text are escaped (a raw pipe would break the table).
     pipe_row = ListingRow(
         "https://github.com/o/r.git",
@@ -917,19 +982,102 @@ def test_render_listing_emits_per_plan_sections() -> None:
         "open",
         False,
         goal="a | b",
-        task_titles=(("1", "x | y"),),
+        task_titles=(("1", "x | y", True),),
     )
     md2 = render_listing([pipe_row])
-    assert "**Goal:** a \\| b" in md2
-    assert "<br>1 x \\| y" in md2
+    assert "| G | a \\| b | ☐ |" in md2
+    assert "| 1 | x \\| y | ☑ |" in md2
     # Byte-stable across calls; single trailing newline; no trailing spaces.
     assert render_listing([with_goal_tasks, default]) == md
     assert md.endswith("\n") and not md.endswith("\n\n")
     assert all(line == line.rstrip() for line in md.splitlines())
 
 
+@pytest.mark.parametrize(
+    ("state", "mark"),
+    [("success", "☑"), ("open", "☐"), ("pending", "☐"), ("failure", "☐"), ("review", "☐")],
+)
+def test_render_listing_goal_mark_mirrors_state(state: str, mark: str) -> None:
+    """The G row's check mark is ☑ iff the row's state is "success" (never stored)."""
+    row = ListingRow(
+        "https://github.com/o/r.git",
+        "main",
+        False,
+        1,
+        "planning/g/work_plan.md",
+        "G",
+        state,
+        False,
+        goal="Finish it.",
+    )
+    md = render_listing([row])
+    assert f"| G | Finish it. | {mark} |" in md
+
+
+def test_render_listing_goal_mark_mirrors_state_task_flags_unchanged() -> None:
+    """The state changes ONLY the G row: task ☑/☐ keep following their done flags."""
+    base = ListingRow(
+        "https://github.com/o/r.git",
+        "main",
+        False,
+        1,
+        "planning/g/work_plan.md",
+        "G",
+        "open",
+        False,
+        goal="Finish it.",
+        task_titles=(("1", "One", True), ("2", "Two", False)),
+    )
+    md_open = render_listing([base])
+    md_success = render_listing([dataclasses.replace(base, state="success")])
+    assert "| G | Finish it. | ☐ |" in md_open
+    assert "| G | Finish it. | ☑ |" in md_success
+    # The task rows are unaffected by the state: the ☑/☐ marks keep following the
+    # done flags in both renders.
+    for md in (md_open, md_success):
+        assert ["| 1 | One | ☑ |", "| 2 | Two | ☐ |"] == [
+            ln for ln in md.splitlines() if ln.startswith(("| 1 |", "| 2 |"))
+        ]
+
+
+def test_render_parse_round_trip_with_checkmarks_is_byte_stable() -> None:
+    """Render (details incl. ☑ rows) → parse returns exactly the six-cell data rows →
+    re-stamp from the same scan data → re-render is byte-identical (no-op stability)."""
+    rows = [
+        ListingRow(
+            "https://github.com/o/r.git",
+            "main",
+            True,
+            1,
+            "planning/x/work_plan.md",
+            "X",
+            "success",
+            False,
+            goal="Ship it.",
+            task_titles=(("1", "One", True), ("2", "Two | three", False)),
+        ),
+    ]
+    md = render_listing(rows)
+    assert "| G | Ship it. | ☑ |" in md
+    assert "| 1 | One | ☑ |" in md
+    parsed = parse_listing(md)
+    # Exactly the six-cell data rows — no checklist line ever parses.
+    assert [(r.plan, r.priority, r.state) for r in parsed] == [
+        ("planning/x/work_plan.md", 1, "success")
+    ]
+    assert all(r.goal == "" and r.task_titles == () for r in parsed)
+    # Re-stamp the parsed rows from the same scan values → re-render byte-identical,
+    # and the re-rendered listing parses to the same rows (fixed point).
+    restamped = [
+        dataclasses.replace(r, goal=s.goal, task_titles=s.task_titles)
+        for r, s in zip(parsed, rows, strict=True)
+    ]
+    assert render_listing(restamped) == md
+    assert parse_listing(render_listing(restamped)) == parsed
+
+
 def test_render_listing_pipes_round_trip_to_exact_data_rows() -> None:
-    """Goal/tasks with raw pipes: the details cell carries escaped ``\\|`` only AND
+    """Goal/tasks with raw pipes: the checklist cells carry escaped ``\\|`` only AND
     ``parse_listing(render_listing(rows))`` still returns exactly the data rows."""
     rows = [
         ListingRow(
@@ -942,7 +1090,7 @@ def test_render_listing_pipes_round_trip_to_exact_data_rows() -> None:
             "open",
             False,
             goal="a | b",
-            task_titles=(("1", "x | y"),),
+            task_titles=(("1", "x | y", True),),
         ),
         ListingRow(
             "https://github.com/o/r.git",
@@ -954,13 +1102,13 @@ def test_render_listing_pipes_round_trip_to_exact_data_rows() -> None:
             "open",
             False,
             goal="| leading and trailing |",
-            task_titles=(("2", "p | q | r"), ("3", "plain")),
+            task_titles=(("2", "p | q | r", False), ("3", "plain", True)),
         ),
     ]
     md = render_listing(rows)
-    assert "**Goal:** a \\| b" in md and "<br>1 x \\| y" in md
-    assert "**Goal:** \\| leading and trailing \\|" in md and "<br>2 p \\| q \\| r" in md
-    assert "| **Goal:** a | b" not in md  # never an UNESCAPED pipe in the details cell
+    assert "| G | a \\| b | ☐ |" in md and "| 1 | x \\| y | ☑ |" in md
+    assert "| G | \\| leading and trailing \\| | ☐ |" in md and "| 2 | p \\| q \\| r | ☐ |" in md
+    assert "| G | a | b |" not in md  # never an UNESCAPED pipe in the details cell
     parsed = parse_listing(md)
     assert [(r.plan, r.priority, r.title) for r in parsed] == [
         ("planning/p/work_plan.md", 1, "P"),
@@ -982,7 +1130,7 @@ def test_listing_pipeline_fixed_point() -> None:
             folder="planning/orbit-dmp",
             title="ORBIT DMP v0",
             goal="Build the consortium DMP, table-first.",
-            task_titles=(("1", "Skeleton & front matter"), ("2", "Master table 1")),
+            task_titles=(("1", "Skeleton & front matter", True), ("2", "Master table 1", False)),
         ),
         _plan(folder="planning/unitest", title="Unit tests"),
     ]
@@ -1011,21 +1159,22 @@ def test_listing_pipeline_fixed_point() -> None:
         assert lines[i + 2] == "|----------|----------|------|-------|-------|--------|"
         assert lines[i + 3].startswith(f"| ☐ | {priority} | ")
         assert lines[i + 3].endswith(" | open | ☐ |")
-    # The stamped plan's details table follows its data row after exactly one blank
-    # line, one task per <br> line; the plan with NEITHER goal nor tasks has NO
-    # details table at all.
+    # The stamped plan's details checklist follows its data row after exactly one blank
+    # line: header + separator + the G row (☐: state open) + one row per task (☑/☐ per
+    # the done flag). The plan with NEITHER goal nor tasks has NO checklist at all.
     assert lines[heads[0] + 4] == ""
-    assert lines[heads[0] + 5 : heads[0] + 8] == [
-        "| details |",
-        "|---------|",
-        "| **Goal:** Build the consortium DMP, table-first.<br>**Tasks:**<br>"
-        "1 Skeleton & front matter<br>2 Master table 1 |",
+    assert lines[heads[0] + 5 : heads[0] + 10] == [
+        _DETAILS_HEADER,
+        _DETAILS_SEPARATOR,
+        "| G | Build the consortium DMP, table-first. | ☐ |",
+        "| 1 | Skeleton & front matter | ☑ |",
+        "| 2 | Master table 1 | ☐ |",
     ]
-    assert heads[1] == heads[0] + 9  # exactly one blank line between the two blocks
+    assert heads[1] == heads[0] + 11  # exactly one blank line between the two blocks
     assert lines[heads[1] + 3] == (
         "| ☐ | 2 | planning/unitest/work_plan.md | Unit tests | open | ☐ |"
     )
-    assert "| details |" not in lines[heads[1] :]
+    assert _DETAILS_HEADER not in lines[heads[1] :]
 
 
 def test_repo_from_url_forms() -> None:
@@ -1067,16 +1216,17 @@ def test_reconcile_discovers_new_plan_empty_and_nonempty_table() -> None:
     assert doc["plans"][plan.identity]["attempt"] == 0
     assert f"discovered {plan.identity} (y2d2/ARP_MPE @ main)" in log
 
-    # A plan with known goal/tasks → the output row is stamped with them.
+    # A plan with known goal/task-triples → the output row is stamped with them
+    # (reconcile passes the done flags through untouched).
     known = _plan(
         folder="planning/known",
         title="Known plan",
         goal="The known goal.",
-        task_titles=(("1", "One"), ("2", "Two")),
+        task_titles=(("1", "One", True), ("2", "Two", False)),
     )
     rows_known, _, _ = reconcile([known], [], fresh_state(), now=NOW)
     assert rows_known[0].goal == "The known goal."
-    assert rows_known[0].task_titles == (("1", "One"), ("2", "Two"))
+    assert rows_known[0].task_titles == (("1", "One", True), ("2", "Two", False))
 
     # Non-empty table in the same (repo_url, branch) section → priority max+1.
     other = _plan(folder="planning/unitest", title="Unit tests")
