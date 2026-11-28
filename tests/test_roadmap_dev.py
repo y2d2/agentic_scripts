@@ -58,6 +58,7 @@ from agentic_scripts.workflows.roadmap_dev import (
     render_listing,
     repo_from_url,
     repo_slug,
+    task_done_labels,
     validate_state,
 )
 
@@ -439,6 +440,50 @@ def test_extract_task_titles_file_name_tier_and_empty() -> None:
     # Empty input → ().
     assert extract_task_titles("") == ()
     assert extract_task_titles("", []) == ()
+
+
+# --- task_done_labels (report-file existence → completion labels) ------------- #
+
+
+def test_task_done_labels_matches_report_spellings() -> None:
+    """Underscore + hyphen spellings and folder-relative paths all yield their label."""
+    assert task_done_labels(["lightweight_dev_task_1_engine_scaffold.md"]) == frozenset({"1"})
+    assert task_done_labels(["lightweight-dev_task_3b_fix_ci.md"]) == frozenset({"3b"})
+    # Folder-relative path (basename-anchored match, like _TASK_FILE_NAME_RE).
+    assert task_done_labels(["sub/lightweight_dev_task_2_runner.md"]) == frozenset({"2"})
+
+
+def test_task_done_labels_mixed_folder() -> None:
+    """A mixed folder yields EXACTLY the reported labels; specs and notes are ignored."""
+    names = [
+        "work_plan.md",
+        "work_plan_task_1_engine_scaffold.md",
+        "work_plan_task_2_runner.md",
+        "work_plan_task_3_docs.md",
+        "work_plan_task_4_check.md",
+        "work_plan_task_5_final.md",
+        "lightweight_dev_task_1_engine_scaffold.md",
+        "lightweight_dev_task_2_runner.md",
+        "lightweight-dev_task_5_final.md",
+        "questions.md",
+    ]
+    assert task_done_labels(names) == frozenset({"1", "2", "5"})
+
+
+def test_task_done_labels_non_matches_and_empty() -> None:
+    """Specs, missing desc segment, foreign prefixes, plurals and wrong case never match."""
+    for name in (
+        "work_plan_task_1_x.md",
+        "lightweight_dev_task_1.md",  # no `_<desc>_` segment
+        "not-lightweight_dev_task_2_x.md",  # basename anchor rejects the prefix
+        "lightweight_dev_tasks_1_x.md",  # plural
+        "Lightweight_Dev_Task_1_x.md",  # case-sensitive
+    ):
+        assert task_done_labels([name]) == frozenset()
+    # Empty / None-ish input → frozenset().
+    assert task_done_labels([]) == frozenset()
+    assert task_done_labels(()) == frozenset()
+    assert task_done_labels(None) == frozenset()  # type: ignore[arg-type]
 
 
 def test_discover_plans_filters_sorts_and_stamps() -> None:

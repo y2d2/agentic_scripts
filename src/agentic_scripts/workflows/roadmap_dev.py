@@ -367,6 +367,12 @@ _TASK_FILE_ANY_RE = re.compile(r"work_plan_task_(\d+)([a-z]?)_(.+?)\.md")
 #: too.
 _TASK_FILE_NAME_RE = re.compile(r"(?:^|/)work_plan_task_(\d+)([a-z]?)_(.+)\.md$")
 
+#: A ``lightweight[-_]dev_task_<num>[<letter>]_<desc>.md`` result-report file name, anchored
+#: on the basename so folder-relative paths (``sub/lightweight_dev_task_1_x.md``) match too.
+#: Accepts both the underscore spelling (what the sub-agent writes) and the hyphenated
+#: spelling shown elsewhere in the docs.
+_TASK_REPORT_NAME_RE = re.compile(r"(?:^|/)lightweight[-_]dev_task_(\d+)([a-z]?)_[^/]*\.md$")
+
 
 def extract_goal(work_plan_text: str) -> str:
     """Return the plan goal text from a ``work_plan.md`` text.
@@ -628,6 +634,37 @@ def extract_task_titles(
         if label not in pairs:
             pairs[label] = (num, letter, match.group(3).replace("_", " "))
     return _sort_task_pairs(pairs)
+
+
+def task_done_labels(file_names: Sequence[str]) -> frozenset[str]:
+    """Return the task labels whose lightweight-dev result report exists in the folder.
+
+    Purpose:
+        The listing's details table marks each task's completion: a task counts as done
+        when the plan folder carries its result report, named
+        ``lightweight[-_]dev_task_<num>[<letter>]_<desc>.md`` (both the underscore and the
+        hyphenated spelling are accepted). The label follows the plan's own numbering —
+        digits plus an optional single lowercase letter (``"1"``, ``"3b"``).
+
+    Args:
+        file_names: The plan folder's file names (basenames or folder-relative paths —
+            basename-anchored, like :data:`_TASK_REPORT_NAME_RE`).
+
+    Returns:
+        The set of ``<num>[<letter>]`` labels that have a report file (e.g.
+        ``frozenset({"1", "2", "5"})``); empty when no name matches.
+
+    Note:
+        Never raises on empty/None-ish input (``None`` / ``""`` / ``()`` → ``frozenset()``).
+        Report *content* is deliberately NOT parsed: file existence means "completed" (the
+        reports carry no stable status line).
+    """
+    labels: set[str] = set()
+    for name in file_names or ():
+        match = _TASK_REPORT_NAME_RE.search(name)
+        if match:
+            labels.add(f"{match.group(1)}{match.group(2) or ''}")
+    return frozenset(labels)
 
 
 @dataclass(frozen=True)
