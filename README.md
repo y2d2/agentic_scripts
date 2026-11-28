@@ -444,8 +444,10 @@ flowchart TD
 per repo (repo URL as header), one `##` section per branch, and within each branch one
 `###` section per plan — repo/branch are headers, not columns. Each plan renders as its
 own `### <plan path>` heading, a six-column data-row table, and a workflow-rendered
-single-column `details` table (goal + one `<br>`-separated task line per task, skipped
-entirely when there is nothing to show — the engine parses only the six-cell data rows):
+three-column `details` checklist (columns `# | details | ✓`: the goal row (`#` is `G`)
+followed by one row per task, carrying the plan's own task labels (`1`, `3b`, …); it is
+skipped entirely when the plan has neither goal nor tasks, and the engine parses only
+the six-cell data rows):
 
 ```markdown
 # https://github.com/y2d2/ARP_MPE.git
@@ -455,9 +457,11 @@ entirely when there is nothing to show — the engine parses only the six-cell d
 |----------|----------|------|-------|-------|--------|
 | ☐ | 1 | planning/orbit-sim/work_plan.md | ORBIT sim extension | open | ☐ |
 
-| details |
-|---------|
-| **Goal:** Build the DMP, table-first.<br>**Tasks:**<br>1 Skeleton & front matter<br>2 Master table |
+| # | details | ✓ |
+|---|---------|---|
+| G | Build the DMP, table-first. | ☐ |
+| 1 | Skeleton & front matter | ☑ |
+| 2 | Master table | ☐ |
 ```
 
 | Column | Owner | Meaning |
@@ -469,11 +473,15 @@ entirely when there is nothing to show — the engine parses only the six-cell d
 | `state` | workflow | See the state machine below. The one sanctioned user edit: `failure` → `open`. |
 | `remove` | user | Valid on `success` rows: the row is dropped on the next scan (reappears as `success` while the attempt branch is unmerged, then disappears for good). |
 
-The `details` table is **workflow-owned**: editing it in `plans.md` is pointless — the
-next scan rewrites it; the sanctioned way to change what it shows is editing the plan
-itself. **Identity:** repo + branch + plan-folder path + content hash of the folder
-(excluding the workflow-written `questions.md` / `failure.md`) — **an edited plan is a
-new plan** (new row, new attempt numbering).
+The `details` table — **including its ✓ column** — is **workflow-owned**: editing it in
+`plans.md` is pointless — the next scan rewrites it; the goal/task text still comes from
+the plan itself, so editing the plan is the sanctioned way to change what shows.
+**Check marks:** a task row flips to ☑ once the plan folder contains its
+`lightweight_dev_task_<label>_*.md` result report (the report the dev agent commits when
+it completes the task) and stays ☐ before that; the `G` row is ☑ exactly when the plan's
+state is `success`. **Identity:** repo + branch + plan-folder path + content hash of
+the folder (excluding the workflow-written `questions.md` / `failure.md`) — **an edited
+plan is a new plan** (new row, new attempt numbering).
 
 ### State machine
 
