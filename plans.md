@@ -455,15 +455,6 @@
 |---------|
 | **Goal:** Update `projects/ORBIT/ORBIT_people_per_WP.md` with staffing changes since 13 Oct 2026.<br>**Tasks:**<br>1 Rewrite file + commit |
 
-### planning/orbit-plenary-i-slides/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 8 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
-
-| details |
-|---------|
-| **Goal:** —<br>**Tasks:**<br>9 outcomes report<br>10 cleaned deck |
-
 ### planning/unitree-vault-note/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
@@ -472,6 +463,15 @@
 | details |
 |---------|
 | **Goal:** Persist a short, clean note in the ORBIT vault documenting the Unitree G1/Go2 configuration FARI put in the tender (PROC 1), with mail provenance tags.<br>**Tasks:**<br>1 Create the vault note<br>2 Commit + push the note (depends on #1) |
+
+### planning/orbit-plenary-i-slides/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 10 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+
+| details |
+|---------|
+| **Goal:** —<br>**Tasks:**<br>9 outcomes report<br>10 cleaned deck |
 
 # https://github.com/y2d2/ARP_utility_code.git
 ## fix/code-review-findings
