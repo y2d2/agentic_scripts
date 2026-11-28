@@ -40,13 +40,16 @@ Rationale:
     sanctioned state-cell edit is re-arming a ``failure`` row to ``open``). Each plan
     renders as its own **per-plan section**: a ``### <plan>`` heading, its own six-column
     table (header + separator + the single data row) and — only when the plan has goal
-    text or task titles — a separate single-column **details table** (``| details |``)
-    whose one cell holds ``**Goal:** …`` plus each task on its own ``<br>`` line. These
-    details are workflow-owned, derived from the scanned plan's Purpose/Goal line and its
-    task headings / task tables / ``work_plan_task_*.md`` file names, re-stamped from the
-    scan on every reconcile (so they are always fresh), byte-stable across no-op passes,
-    and deliberately skipped by the parser (the ``###`` line is not a table row and the
-    1-cell details lines never pass the six-cell gate). Delivery is
+    text or task titles — a separate three-column **details checklist**
+    (``| # | details | ✓ |``): one row per entry, the goal row (label ``G``) first with
+    its check mark mirroring the plan state (☑ iff ``state == "success"``, else ☐), then
+    one row per task (☑ when a ``lightweight[-_]dev_task_<label>_*.md`` result report
+    exists in the plan folder, else ☐). These details are workflow-owned, derived from
+    the scanned plan's Purpose/Goal line, its task headings / task tables /
+    ``work_plan_task_*.md`` file names, and its result reports, re-stamped from the scan
+    on every reconcile (so they are always fresh), byte-stable across no-op passes, and
+    deliberately skipped by the parser (the ``###`` line is not a table row and the
+    3-cell checklist rows never pass the six-cell gate). Delivery is
     the pushed attempt branch — **this workflow never creates PRs and never calls the
     GitHub API** (user decision 2026-11-21: PR/merge is human-level verification; all git
     over SSH). Every function in the core is pure: no git, no network, no subprocess, and
@@ -116,13 +119,14 @@ _LISTING_HEADER = "| approval | priority | plan | title | state | remove |"
 #: verbatim from the listing contract sample (header width + 2).
 _LISTING_SEPARATOR = "|----------|----------|------|-------|-------|--------|"
 
-#: The single-column header row of the workflow-owned per-plan details table (the parser
-#: skips it: one cell, not six).
-_DETAILS_HEADER = "| details |"
+#: The three-column header row of the workflow-owned per-plan details checklist
+#: (``#`` / ``details`` / ``✓``; the parser skips it: three cells, not six).
+_DETAILS_HEADER = "| # | details | ✓ |"
 
-#: The separator row of the workflow-owned per-plan details table (header width + 2,
-#: mirroring :data:`_LISTING_SEPARATOR`; likewise skipped by the parser).
-_DETAILS_SEPARATOR = "|---------|"
+#: The separator row of the workflow-owned per-plan details checklist (column widths
+#: copied from the header cells + 2, mirroring :data:`_LISTING_SEPARATOR`; likewise
+#: skipped by the parser).
+_DETAILS_SEPARATOR = "|---|---------|---|"
 
 #: Sandbox layout sub-directories (the workflow-level root is ``ctx.sandbox_dir /
 #: "roadmap-dev"``, composed by the workflow shell): clones under
@@ -680,8 +684,12 @@ class Plan:
         goal: The plan goal text for the listing details table (from :func:`extract_goal`;
             ``"—"`` — counted as no goal by the renderer — when the plan carries no
             Purpose/Goal marker).
-        task_titles: The ``(label, title)`` task pairs for the listing details table (from
-            :func:`extract_task_titles`; ``()`` when no tier yields a task).
+        task_titles: The ``(label, title, done)`` task triples for the listing details
+            checklist (labels/titles from :func:`extract_task_titles`, ``done`` from
+            :func:`task_done_labels`; ``()`` when no tier yields a task). ``done`` is
+            True when a ``lightweight[-_]dev_task_<label>_*.md`` result report exists in
+            the plan folder; the goal row's check mark is NOT stored here — it mirrors
+            the plan state at render time.
 
     Note:
         :attr:`identity` and :attr:`topic` are derived properties — the identity is always
@@ -698,7 +706,7 @@ class Plan:
     title: str
     content_hash: str
     goal: str = ""
-    task_titles: tuple[tuple[str, str], ...] = ()
+    task_titles: tuple[tuple[str, str, bool], ...] = ()
 
     @property
     def identity(self) -> str:
@@ -756,6 +764,9 @@ def discover_plans(repo: str, branch: str, entries: list[PlanEntry]) -> list[Pla
         segments = entry.dir.split("/")
         if not segments or segments[0] != "planning" or ARCHIVED_SEGMENT in segments:
             continue  # not under planning/, or archived
+        titles = extract_task_titles(entry.work_plan_text, list(entry.file_contents))
+        done = task_done_labels(entry.file_contents)
+        task_titles = tuple((label, title, label in done) for label, title in titles)
         plans.append(
             Plan(
                 repo=repo,
@@ -764,7 +775,7 @@ def discover_plans(repo: str, branch: str, entries: list[PlanEntry]) -> list[Pla
                 title=extract_title(entry.work_plan_text),
                 content_hash=plan_folder_hash(entry.file_contents),
                 goal=extract_goal(entry.work_plan_text),
-                task_titles=extract_task_titles(entry.work_plan_text, list(entry.file_contents)),
+                task_titles=task_titles,
             )
         )
     plans.sort(key=lambda p: p.path)
@@ -925,8 +936,11 @@ class ListingRow:
             parsed listing carries no goal, so it defaults to ``""`` and is re-stamped
             from the scan on every reconcile; the scan's ``"—"`` no-marker sentinel is
             counted as no goal by the renderer).
-        task_titles: The ``(label, title)`` task pairs for this plan's details table
-            (workflow-owned; same default/re-stamp behaviour as :attr:`goal`).
+        task_titles: The ``(label, title, done)`` task triples for this plan's details
+            checklist (workflow-owned; same default/re-stamp behaviour as :attr:`goal`).
+            ``done`` is True when a ``lightweight[-_]dev_task_<label>_*.md`` result
+            report exists in the plan folder; the goal row's check mark is never stored
+            — it mirrors :attr:`state` at render time.
     """
 
     repo_url: str
@@ -938,7 +952,7 @@ class ListingRow:
     state: str
     remove: bool
     goal: str = ""
-    task_titles: tuple[tuple[str, str], ...] = ()
+    task_titles: tuple[tuple[str, str, bool], ...] = ()
 
 
 def _checkmark(cell: str) -> bool:
@@ -966,23 +980,29 @@ def _plan_block(row: ListingRow) -> list[str]:
         The per-plan section: a ``### <plan>`` heading, the plan's OWN six-column table
         (:data:`_LISTING_HEADER` + :data:`_LISTING_SEPARATOR` + the single data row —
         byte-identical to the previous renderer), and — only when the plan has goal text
-        or task titles — exactly one blank line plus the single-column details table
-        (:data:`_DETAILS_HEADER` + :data:`_DETAILS_SEPARATOR` + the one content line
-        ``| **Goal:** …<br>**Tasks:**<br><label> <title>… |``). The em-dash sentinel
-        :func:`extract_goal` yields for a plan without a Purpose/Goal marker counts as
-        NO goal: a plan with neither real goal nor tasks emits NO details table at all
-        (user decision 2026-11-25 — no all-dash noise row), and the caller's blank line
-        after the block then separates it from the next heading. An absent goal renders
-        ``**Goal:** —``; empty tasks render ``<br>**Tasks:** —`` directly after the goal
-        part. The goal and each ``<label> <title>`` task line are escaped with
-        :func:`_escape_cell`; the ``<br>`` separators and the table pipes never are.
+        or task titles — exactly one blank line plus the three-column **details
+        checklist** (:data:`_DETAILS_HEADER` + :data:`_DETAILS_SEPARATOR` + the ``G``
+        goal row + one row per task). The em-dash sentinel :func:`extract_goal` yields
+        for a plan without a Purpose/Goal marker counts as NO goal: a plan with neither
+        real goal nor tasks emits NO details checklist at all (user decision 2026-11-25
+        — no all-dash noise row), and the caller's blank line after the block then
+        separates it from the next heading. The goal row is
+        ``| G | <goal or —> | ☑/☐ |`` and its check mark MIRRORS the plan state
+        (☑ iff ``row.state == "success"``, else ☐) — it is never stored. Each task row
+        is ``| <label> | <title> | ☑/☐ |`` with ☑ iff the triple's ``done`` flag is set
+        (a ``lightweight[-_]dev_task_<label>_*.md`` result report exists in the plan
+        folder). An absent goal renders ``—`` in the goal row's details cell. The goal,
+        each label and each title are escaped with :func:`_escape_cell`; the table pipes,
+        the ``G`` label and the check marks never are, and no line carries trailing
+        spaces.
 
     Args:
-        row: The row to render (its ``goal`` / ``task_titles`` drive the details table).
+        row: The row to render (its ``goal`` / ``task_titles`` / ``state`` drive the
+            details checklist).
 
     Returns:
-        The section lines without a trailing blank line: 4 lines (no details table) or
-        8 lines (blank + 3-line details table).
+        The section lines without a trailing blank line: 4 lines (no details checklist)
+        or 8 + n_tasks lines (blank + header + separator + goal row + one row per task).
     """
     lines = [
         f"### {row.plan}",
@@ -995,13 +1015,12 @@ def _plan_block(row: ListingRow) -> list[str]:
     ]
     goal = row.goal.strip()
     if goal not in ("", "—") or row.task_titles:
-        body = f"**Goal:** {_escape_cell(goal or '—')}<br>**Tasks:**"
-        if row.task_titles:
-            for label, title in row.task_titles:
-                body += "<br>" + _escape_cell(f"{label} {title}".strip())
-        else:
-            body += " —"
-        lines += ["", _DETAILS_HEADER, _DETAILS_SEPARATOR, f"| {body} |"]
+        lines += ["", _DETAILS_HEADER, _DETAILS_SEPARATOR]
+        goal_mark = "☑" if row.state == "success" else "☐"
+        lines.append(f"| G | {_escape_cell(goal or '—')} | {goal_mark} |")
+        for label, title, done in row.task_titles:
+            task_mark = "☑" if done else "☐"
+            lines.append(f"| {_escape_cell(label)} | {_escape_cell(title)} | {task_mark} |")
     return lines
 
 
@@ -1019,16 +1038,18 @@ def parse_listing(md: str) -> list[ListingRow]:
 
         The workflow-rendered **per-plan section** (see :func:`render_listing`) never
         parses as a data row: its ``### <plan>`` heading is not a ``|``-row, and the
-        single-column details table (``| details |``, ``|---------|`` and the one
-        ``| **Goal:** …<br>**Tasks:**… |`` content line) is one cell — never the six a
-        data row needs — so every details line trips the cell-count guard (an escaped
-        ``\\|`` may split the content line into more cells, still not six, and stray
-        fragments fail the priority ``int()`` gate too); blank separator lines and free
-        text are skipped as always. Live listings may still contain the PREVIOUS
-        renderer's six-cell detail lines (em-dash filler cells around the goal and task
-        text, one under each data row); they keep being skipped because their priority
-        cell (the em dash ``—``) fails ``int()`` — parser backward compatibility for
-        those lines is part of the contract.
+        three-column details checklist (``| # | details | ✓ |``, ``|---|---------|---|``
+        and the ``| G | … | ☑/☐ |`` / ``| <label> | <title> | ☑/☐ |`` rows) is three
+        cells — never the six a data row needs — so every checklist line trips the
+        cell-count guard (an escaped ``\\|`` may split a line into more cells, still not
+        six, and stray fragments fail the priority ``int()`` gate too); blank separator
+        lines and free text are skipped as always. Live listings may still contain the
+        PREVIOUS renderers' detail lines — the old single-column details table
+        (``| details |``, ``|---------|`` and its one ``| **Goal:** …<br>… |`` content
+        line) and the six-cell em-dash detail lines (em-dash filler cells around the
+        goal and task text, one under each data row); they keep being skipped as before
+        (cell count / priority ``int()`` failure respectively) — parser backward
+        compatibility for those lines is part of the contract.
 
     Args:
         md: The full listing text (may be empty or None).
@@ -1153,9 +1174,10 @@ def reconcile(
            <id> (user set open)``). Any other divergence → the workflow state wins.
            User-owned cells (``approval``, ``priority``, ``remove``) are always preserved
            from the existing row. Every emitted row (rules 1, 2 and the 5-re-add) is
-           re-stamped with the details-table fields ``goal`` / ``task_titles`` from the
-           scanned :class:`Plan` (parsed rows carry no goal/tasks) — so each plan's
-           details table is always fresh on the next render.
+           re-stamped with the details-checklist fields ``goal`` / ``task_titles`` from
+           the scanned :class:`Plan` (parsed rows carry no goal/tasks) — the triples
+           carry the per-task ``done`` flags from the scan, so each plan's details
+           checklist, marks included, is always fresh on the next render.
         2. **Scanned + not in state** → new row (no checkmarks, ``state="open"``, priority
            = max in its (repo_url, branch) table + 1, or 1 for an empty table) + new state
            entry; logged ``discovered <id> (<repo> @ <branch>)``.
