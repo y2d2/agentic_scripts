@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import strip_live_repo_workflows
 
 from agentic_scripts.scheduler import acquire_lock, run
 
@@ -33,10 +32,6 @@ SHIPPED_CONFIG = REPO_ROOT / "config" / "workflows.yaml"
 def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: Path) -> Path:
     """Write a tmp copy of the shipped config pointed at the given dirs and return its path.
 
-    The real-repo workflow (``roadmap-dev`` + its ``roadmap_prompts`` section) is stripped
-    from the copy via :func:`conftest.strip_live_repo_workflows`, so a smoke fire can never
-    clone the user's repos or push listing commits.
-
     Args:
         tmp_path: pytest temp dir to hold the YAML file.
         state_dir/log_dir/sandbox_dir: Absolute dirs for the ``paths`` section.
@@ -44,7 +39,7 @@ def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: P
     Returns:
         The path of the written config file.
     """
-    data = strip_live_repo_workflows(yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8")))
+    data = yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8"))
     data["paths"] = {
         "state_dir": str(state_dir),
         "log_dir": str(log_dir),

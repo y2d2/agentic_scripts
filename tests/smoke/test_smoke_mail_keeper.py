@@ -38,7 +38,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import strip_live_repo_workflows
 
 from agentic_scripts.scheduler import run
 
@@ -549,11 +548,9 @@ def _write_config(
 
     ``paths`` → tmp dirs, ``admin_repo`` → fixture vault, ``agent.binary`` → shim path,
     ``agent.model: null``, ``agent.timeout_minutes: 5``. The ``noop`` entry runs first
-    (harmless); ``mail-keeper`` second. ``roadmap-dev`` (+ ``roadmap_prompts``) is stripped
-    — see :func:`conftest.strip_live_repo_workflows` — so this forced run never reaches
-    GitHub.
+    (harmless); ``mail-keeper`` second.
     """
-    data = strip_live_repo_workflows(yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8")))
+    data = yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8"))
     data["paths"] = {
         "state_dir": str(state_dir),
         "log_dir": str(log_dir),

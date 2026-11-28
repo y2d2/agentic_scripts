@@ -18,25 +18,6 @@ paths:
   log_dir: logs
   sandbox_dir: sandbox
 admin_repo: /workspace/Obsidian/ARP_roadmap   # string or null
-roadmap_prompts:
-  allowed_repos:             # GitHub repos to scan for un-archived plans ("owner/name"); empty = no-op
-    - y2d2/ARP_MPE
-    - y2d2/ARP_implementations
-    - y2d2/ARP_1A_anchored_implementations
-    - y2d2/ARP_utility_code
-    - y2d2/PRP_ARP_M
-    - y2d2/ARP_IMU
-    - y2d2/agentic_scripts
-    - y2d2/ARP_roadmap
-    - y2d2/ARP_engine
-  listing_repo: y2d2/agentic_scripts   # live plan listing repo ("owner/name")
-  listing_repo_url: ""       # clone-URL override; "" = derived git@github.com:<listing_repo>.git
-  listing_path: plans.md     # listing file inside the listing repo
-  listing_branch: main       # branch holding the listing
-  local_listing: plans.md    # also mirror the listing into <project root>/plans.md; null disables
-  run_timeout_minutes: 480   # per-job hard timeout for an execution run
-  test_commands: {}          # optional per-repo test command (keys must be in allowed_repos)
-  repo_urls: {}              # optional per-repo clone-URL overrides (local fixtures / mirrors)
 oc_todo:
   repos: []                  # GitHub repos to scan ("owner/name"); empty = no-op scan
   max_todos_per_repo: 3      # max todos processed per repo per run
@@ -55,9 +36,3 @@ workflows:
     enabled: true
     module: agentic_scripts.workflows.oc_todo
     agent: oc-todo-resolver
-  roadmap-dev:
-    enabled: true
-    module: agentic_scripts.workflows.roadmap_dev
-    agent: planner-enhanced
-    gate: idle              # quiet_window (default) or idle; idle = runs on every non-skipped fire,
-                            # its drain decision comes from the session-based idle gate

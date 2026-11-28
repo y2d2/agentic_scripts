@@ -3,8 +3,8 @@
 from arguments.
 
 Purpose:
-    Wrap the exact set of git operations the OC-todo, mail-keeper, and roadmap-dev
-    workflows need — repo detection, branch/ref resolution, clone/fetch, remote branch
+    Wrap the exact set of git operations the registered workflows need — repo detection,
+    branch/ref resolution, clone/fetch, remote branch
     listing, tree listing, single-file reads (text and binary), worktree add/remove,
     staged adds, tracked renames, branch re-point checkouts, idempotent commits, and
     push — as small, explicit subprocess calls with bounded timeouts.
@@ -283,7 +283,7 @@ class Git:
         """Return the file paths in ``ref``'s tree (recursive, sorted, no directories).
 
         Purpose:
-            The roadmap-dev scanner's primitive: enumerate every file committed on a
+            A scanner's primitive: enumerate every file committed on a
             branch ref (e.g. ``"origin/dev"``) without checking it out, so candidate plan
             folders (``planning/**/work_plan.md``) can be identified from their paths
             alone. Runs ``git -C <repo> ls-tree -r --name-only <ref>`` — ``-r`` recurses
@@ -372,7 +372,7 @@ class Git:
         """Move a tracked path ``src`` to ``dst`` (staged) in the repo at ``path``.
 
         Purpose:
-            The roadmap-dev archive step's primitive (Task 4): ``git -C <path> mv <src>
+            An archive step's primitive: ``git -C <path> mv <src>
             <dst>`` moves a plan folder to ``planning/archived/<topic>/`` as a staged
             rename, so the archive commit records the move (not a delete + add) and the
             history stays reviewable.
@@ -446,8 +446,8 @@ class Git:
         """Check out ``branch``, re-pointing it to ``ref`` when given (``-B``).
 
         Purpose:
-            Ensure a workflow-owned clone is on a specific branch: the roadmap-dev
-            prompts clone checks out the remote's default branch, and the listing may
+            Ensure a workflow-owned clone is on a specific branch: a listing clone
+            checks out the remote's default branch, and the listing may
             live on a different one — ``checkout -B <branch> <ref>`` (e.g. ``-B main
             origin/main``) creates or resets the local branch to ``ref`` and switches to
             it. With ``ref=None`` a plain ``checkout -B <branch>`` simply re-selects the
@@ -561,7 +561,7 @@ class Git:
 
         Purpose:
             Binary-safe single-file read from an arbitrary revision without checking it
-            out — the roadmap-dev scanner uses this to hash plan folders, which may
+            out — a plan-folder hasher uses this to read arbitrary files, which may
             contain binary assets (images, committed build artifacts) that would crash
             a text-mode read: with ``text=True``, ``git show`` of a non-UTF-8 blob
             raises ``UnicodeDecodeError`` on stdout decoding, which is NOT a
@@ -576,7 +576,7 @@ class Git:
 
         Note:
             :meth:`show_file` remains the text form for text-only consumers (the
-            roadmap-dev listing file, the OC-todo marker context window), whose trailing
+            plan listing file, the OC-todo marker context window), whose trailing
             newlines are stripped; use :meth:`show_file_bytes` whenever the content may
             not be valid UTF-8.
 

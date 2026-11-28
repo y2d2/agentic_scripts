@@ -89,8 +89,8 @@ class AgentResult:
         duration_seconds: Wall-clock seconds the run took (from spawn to reap).
         pid: The child's PID, captured right after ``Popen``; None when the result was
             built without a live process (the spawn itself failed). Forensic value only —
-            no workflow relies on pid liveness (the roadmap-dev reaper treats every
-            ``pending`` entry in a NEW process as an orphan by construction).
+            no workflow relies on pid liveness (a reaper in a NEW process treats every
+            ``pending`` entry as an orphan by construction).
     """
 
     status: str
@@ -223,7 +223,7 @@ class AgentRunner:
             stderr=subprocess.PIPE,
             start_new_session=True,  # own process group → killpg reaches agent children
         )
-        pid = proc.pid  # forensic: surfaced on AgentResult.pid (roadmap-dev state entries)
+        pid = proc.pid  # forensic: surfaced on AgentResult.pid (workflow state entries)
         self._log.debug("agent %s started (pid=%d): %s", agent, pid, " ".join(cmd))
 
         events: list[dict] = []

@@ -3,7 +3,7 @@
 Purpose:
     Read the shared OpenCode service's state file (``~/.local/state/opencode/service.json``)
     and query its ``/api/session/active`` endpoint to count open interactive (TUI) sessions.
-    The ``roadmap-dev`` idle gate uses this count: zero active sessions means the box is
+    The session-based idle gate uses this count: zero active sessions means the box is
     idle (day or night) and drain work may start; ``--standalone`` headless worker runs do
     not attach to the service and are invisible to the probe by construction.
 

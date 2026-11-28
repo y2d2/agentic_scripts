@@ -30,7 +30,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import strip_live_repo_workflows
 
 from agentic_scripts.scheduler import run
 
@@ -41,10 +40,6 @@ SHIPPED_CONFIG = REPO_ROOT / "config" / "workflows.yaml"
 def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: Path) -> Path:
     """Write a tmp copy of the shipped config pointed at the given dirs and return its path.
 
-    The real-repo workflow (``roadmap-dev`` + its ``roadmap_prompts`` section) is stripped
-    from the copy via :func:`conftest.strip_live_repo_workflows`, so a smoke fire can never
-    clone the user's repos or push listing commits.
-
     Args:
         tmp_path: pytest temp dir to hold the YAML file.
         state_dir/log_dir/sandbox_dir: Absolute dirs for the ``paths`` section.
@@ -52,7 +47,7 @@ def _write_config(tmp_path: Path, state_dir: Path, log_dir: Path, sandbox_dir: P
     Returns:
         The path of the written config file.
     """
-    data = strip_live_repo_workflows(yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8")))
+    data = yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8"))
     data["paths"] = {
         "state_dir": str(state_dir),
         "log_dir": str(log_dir),
@@ -172,7 +167,7 @@ def test_smoke_oc_todo_config_fault(tmp_path: Path, capsys: pytest.CaptureFixtur
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
 
-    data = strip_live_repo_workflows(yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8")))
+    data = yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8"))
     data["paths"] = {
         "state_dir": str(dirs["state"]),
         "log_dir": str(dirs["logs"]),
@@ -195,7 +190,7 @@ def test_smoke_oc_todo_empty_repo_list_no_agent(tmp_path: Path) -> None:
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
 
-    data = strip_live_repo_workflows(yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8")))
+    data = yaml.safe_load(SHIPPED_CONFIG.read_text(encoding="utf-8"))
     data["paths"] = {
         "state_dir": str(dirs["state"]),
         "log_dir": str(dirs["logs"]),
