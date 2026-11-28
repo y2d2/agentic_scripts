@@ -279,16 +279,6 @@
 | 1 | workshop md and commit | ☐ |
 
 ## main
-### planning/esa-bt-gate0-slide/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 199 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
-
-| # | details | ✓ |
-|---|---------|---|
-| G | — | ☐ |
-| 1 | fill bt slide | ☑ |
-
 ### planning/esa-no-open-source/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
@@ -369,17 +359,6 @@
 | G | Update `projects/ORBIT/ORBIT_people_per_WP.md` with staffing changes since 13 Oct 2026. | ☐ |
 | 1 | Rewrite file + commit | ☑ |
 
-### planning/orbit-plenary-i-slides/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 206 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
-
-| # | details | ✓ |
-|---|---------|---|
-| G | — | ☐ |
-| 9 | outcomes report | ☑ |
-| 10 | cleaned deck | ☑ |
-
 ### planning/unitree-vault-note/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
@@ -390,6 +369,27 @@
 | G | Persist a short, clean note in the ORBIT vault documenting the Unitree G1/Go2 configuration FARI put in the tender (PROC 1), with mail provenance tags. | ☐ |
 | 1 | Create the vault note | ☑ |
 | 2 | Commit + push the note (depends on #1) | ☑ |
+
+### planning/esa-bt-gate0-slide/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 208 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
+
+| # | details | ✓ |
+|---|---------|---|
+| G | — | ☐ |
+| 1 | fill bt slide | ☑ |
+
+### planning/orbit-plenary-i-slides/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 209 | planning/orbit-plenary-i-slides/work_plan.md | Work plan — ORBIT Plenary I (28 Oct 2026): slides, deck, post-meeting outcomes | open | ☐ |
+
+| # | details | ✓ |
+|---|---------|---|
+| G | — | ☐ |
+| 9 | outcomes report | ☑ |
+| 10 | cleaned deck | ☑ |
 
 ## oc/orbit-dmp-plan
 ### planning/orbit-dmp-unification/work_plan.md
@@ -542,16 +542,6 @@
 | 2 | Commit + push the note (depends on #1) | ☑ |
 
 ## feature/submodule-migration
-### planning/esa-bt-gate0-slide/work_plan.md
-| approval | priority | plan | title | state | remove |
-|----------|----------|------|-------|-------|--------|
-| ☐ | 1 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
-
-| # | details | ✓ |
-|---|---------|---|
-| G | — | ☐ |
-| 1 | fill bt slide | ☑ |
-
 ### planning/esa-no-open-source/work_plan.md
 | approval | priority | plan | title | state | remove |
 |----------|----------|------|-------|-------|--------|
@@ -653,6 +643,16 @@
 | G | — | ☐ |
 | 9 | outcomes report | ☑ |
 | 10 | cleaned deck | ☑ |
+
+### planning/esa-bt-gate0-slide/work_plan.md
+| approval | priority | plan | title | state | remove |
+|----------|----------|------|-------|-------|--------|
+| ☐ | 11 | planning/esa-bt-gate0-slide/work_plan.md | Work plan — ESA OSIP imec BT Gate 0 slide | open | ☐ |
+
+| # | details | ✓ |
+|---|---------|---|
+| G | — | ☐ |
+| 1 | fill bt slide | ☑ |
 
 # https://github.com/y2d2/ARP_utility_code.git
 ## fix/code-review-findings
